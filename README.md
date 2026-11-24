@@ -2,7 +2,7 @@
   <img src="assets/macbox-logo.png" alt="MacBox official logo" width="240">
 </p>
 
-# MacBox — XCL compatibility layer for Apple Silicon macOS
+<h1 align="center">MacBox — XCL compatibility layer for Apple Silicon macOS</h1>
 
 **MacBox is an experimental ARM macOS compatibility layer and build workflow for
 [XCL](https://github.com/xcl-dev/xcl)**, the Xbox Series X|S compatibility runtime.
