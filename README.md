@@ -5,6 +5,10 @@
 <h1 align="center">MacBox</h1>
 <h2 align="center">XCL compatibility layer for Apple Silicon macOS</h2>
 
+<p align="center">
+  <img src="assets/progress.svg" alt="Project progress: 15% complete" width="420">
+</p>
+
 **MacBox is an experimental ARM macOS compatibility layer and build workflow for
 [XCL](https://github.com/xcl-dev/xcl)**, the Xbox Series X|S compatibility runtime.
 It runs XCL's Windows x86-64 engine on Apple Silicon using **CrossOver, Rosetta 2
