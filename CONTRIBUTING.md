@@ -1,3 +1,25 @@
+# Contributing to MacBox
+
+MacBox maintains an experimental Apple Silicon/macOS compatibility layer around XCL,
+using CrossOver, Rosetta 2 and D3DMetal. Report MacBox issues and submit changes in
+[AyhanSh/MacBox](https://github.com/AyhanSh/MacBox); credit any upstream patch you reuse.
+
+Use `scripts/macos.sh build` and targeted `scripts/macos.sh test` checks. Include your
+Apple chip, memory, macOS, CrossOver, graphics backend, Rust version, exact commands,
+and measured pass/fail/ignore/skip counts. Compare runtime changes with the base on
+the same machine, retaining existing failures and skips. The GitHub macOS workflow
+only cross-compiles: it does not execute XCL, CrossOver, GPU tests or games.
+
+Keep changes focused, preserve GPL-2.0-only licensing and attribution, and never
+include game files, downloaded runtime libraries, personal logs or credentials.
+Disclose AI assistance with the tool and exact model. The PR template records
+known limitations; a passing build does not establish gameplay compatibility.
+
+## Upstream XCL contribution rules (preserved reference)
+
+The original rules below apply when submitting work to upstream XCL. Their Windows
+GPU and retail-title requirements are not claims about MacBox's current validation.
+
 # Contributing to XCL
 
 Thanks for helping. XCL gets far more pull requests than one maintainer can read carefully, so

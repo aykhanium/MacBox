@@ -18,6 +18,7 @@ permissions:
 
 jobs:
   description:
+    if: github.repository == 'xcl-dev/xcl'
     name: PR description
     runs-on: ubuntu-latest
     steps:

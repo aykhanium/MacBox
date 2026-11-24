@@ -1,13 +1,15 @@
-# Security
+# MacBox security
 
 ## Supported versions
 
-Only `main` is supported. There are no releases yet, so fixes land on `main` and nowhere else.
+MacBox is experimental. Security fixes land on `main`; there are no supported releases yet.
 
 ## Reporting a problem
 
-Please don't open a public issue for a security problem. Send it privately to a maintainer on the
-Discord instead: <https://discord.gg/yB5tstRHrn>
+Please report security problems privately through
+[MacBox's GitHub security advisories](https://github.com/AyhanSh/MacBox/security/advisories/new),
+rather than opening a public issue. MacBox reports are handled in this repository;
+upstream XCL has its own maintainers and reporting policy.
 
 Say what the problem is, how to reproduce it, and which commit you tested. A small test case helps
 more than a long write-up.
@@ -16,8 +18,8 @@ Don't attach game files, dumps or anything else from a game package.
 
 ## What counts
 
-XCL runs a game's code with the same rights as your user account. It is not a sandbox, and a game
-run through it is no more contained than any other program you start yourself.
+MacBox runs XCL and a game's code with the same rights as your user account. It is not a sandbox,
+and a game run through it is no more contained than any other program you start yourself.
 
 Things worth reporting:
 
@@ -32,5 +34,5 @@ Bugs that only crash the game, or need online services XCL doesn't provide, are 
 
 ## No warranty
 
-XCL is GPL-2.0 and comes with no warranty (see `LICENSE`). Reports are handled when someone has
-time; there is no fixed response time.
+MacBox retains XCL's GPL-2.0-only license and comes with no warranty (see `LICENSE`). Reports are
+handled when someone has time; there is no fixed response time.

@@ -24,6 +24,7 @@ concurrency:
 
 jobs:
   windows:
+    if: github.repository == 'xcl-dev/xcl'
     name: Build and test (Windows, no GPU)
     runs-on: windows-2025
     timeout-minutes: 45

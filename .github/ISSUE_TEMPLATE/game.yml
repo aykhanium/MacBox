@@ -1,11 +1,11 @@
-name: A game does not run right
-description: A crash, a black or wrong picture, no sound, a hang – with the run's report attached.
+name: A game does not run right on MacBox
+description: A crash, wrong picture, no sound, or hang on Apple Silicon, with the run's report.
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Every run writes a report and a log to `%LOCALAPPDATA%\XCL\<title>\logs\` (`report.json`, `xcl.log`; the previous run's are `report.prev.json`, `xcl.prev.log`). They say most of what is needed – please attach both.
+        Every run writes a report and a log to the CrossOver bottle's `%LOCALAPPDATA%\XCL\<title>\logs\` (`report.json`, `xcl.log`; the previous run's are `report.prev.json`, `xcl.prev.log`). Please attach both after removing personal paths or names.
 
         Do not attach or link game files, dumps or anything from a game package. XCL works only on unpacked games you own and does not help with DRM.
   - type: input
@@ -24,37 +24,45 @@ body:
     validations:
       required: true
   - type: input
-    id: xcl
+    id: macbox
     attributes:
-      label: XCL version
-      description: The release, or the commit you built (`git rev-parse --short HEAD`).
+      label: MacBox commit
+      description: The commit you built (`git rev-parse HEAD`) and whether you changed any files.
     validations:
       required: true
   - type: input
-    id: gpu
+    id: chip
     attributes:
-      label: GPU and driver version
-      placeholder: "NVIDIA GeForce RTX 4060, 32.0.16.2124"
+      label: Apple chip and memory
+      placeholder: "Apple M5 Max, 64 GB"
     validations:
       required: true
   - type: input
-    id: windows
+    id: macos
     attributes:
-      label: Windows version
-      description: "`winver` – and whether the D3D12 Agility SDK is next to xcl.exe (Windows 10)."
-      placeholder: "Windows 11 24H2 (26100.4061)"
+      label: macOS version
+      description: "The version and build from `sw_vers`."
+      placeholder: "macOS 27.2 (26B123)"
+    validations:
+      required: true
+  - type: input
+    id: crossover
+    attributes:
+      label: CrossOver version and graphics backend
+      description: Include the CrossOver version, bottle type, and graphics backend.
+      placeholder: "CrossOver 26.3, Windows 10 64-bit bottle, D3DMetal"
     validations:
       required: true
   - type: textarea
     id: files
     attributes:
       label: report.json and xcl.log
-      description: Drag the two files here. They hold file paths of your PC (your user name), edit them out if you want.
+      description: Attach both files after removing personal paths, user names, and other private information.
     validations:
       required: true
   - type: textarea
     id: console
     attributes:
       label: Console output
-      description: What `xcl run` printed at the start and after the game exited.
+      description: What `scripts/macos.sh run` printed at the start and after the game exited; include environment overrides.
       render: text

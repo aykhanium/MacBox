@@ -1,0 +1,44 @@
+# Cross-build only: hosted CI has no licensed CrossOver setup and runs no Windows
+# executable, GPU test or game. Runtime results must be reported from a real Mac.
+name: macOS cross-build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Apple Silicon cross-build (no runtime tests)
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust 1.99.0
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup override set 1.99.0
+
+      - name: Download verified build dependencies
+        run: ./scripts/macos.sh bootstrap
+
+      - name: Build the release workspace
+        run: ./scripts/macos.sh build
+
+      - name: Compile test executables without running them
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER: x86_64-w64-mingw32-clang
+        run: |
+          export PATH="$GITHUB_WORKSPACE/target/macos/llvm-mingw-20261117-ucrt-macos-universal/bin:$PATH"
+          cargo test --no-run --release --workspace --locked --target x86_64-pc-windows-gnullvm
