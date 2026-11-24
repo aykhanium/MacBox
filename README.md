@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/macbox-logo.png" alt="MacBox official logo" width="240">
+</p>
+
 # MacBox — XCL compatibility layer for Apple Silicon macOS
 
 **MacBox is an experimental ARM macOS compatibility layer and build workflow for
