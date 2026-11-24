@@ -1,0 +1,246 @@
+{
+  "project": "MacBox",
+  "date": "2026-11-24",
+  "source_base": "5ae7547582b65b8accd343d585bbe9911ff51139",
+  "engine_and_script_commit": "4a820cd444b42abb8822ebde22dce49c69054e78",
+  "timing_note": "Runtime and script files were tested before commit; publication changes after this commit are documentation and repository metadata.",
+  "hardware": "Apple M5 Max, 64 GB, macOS 27.2, CrossOver 26.3, D3DMetal",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "validator": "Codex (GPT-6)",
+  "target": "x86_64-pc-windows-gnullvm",
+  "profile": "release",
+  "environment": {
+    "XCL_ASYNC_PSO": "1",
+    "XCL_BACKGROUND": "1",
+    "WINEDEBUG": "-all",
+    "XCL_DXC_DIR": "<checkout>/target/macos/dxc/bin/x64 (Wine Z: mapping)"
+  },
+  "targeted_gpu_environment": {
+    "XCL_REQUIRE_GPU": "wave64,mesh"
+  },
+  "build": {
+    "command": "./scripts/macos.sh build",
+    "result": "success",
+    "test_build_command": "./scripts/macos.sh test --no-run",
+    "test_executables": 15
+  },
+  "runs": [
+    {
+      "name": "disasm",
+      "code": 0,
+      "seconds": 2.2,
+      "harness_counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "reported_runtime_skips": [],
+      "command": [
+        "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine",
+        "--bottle",
+        "XCL",
+        "--",
+        "<checkout>/target/x86_64-pc-windows-gnullvm/release/deps/disasm_e2e-9328f774632e13a7.exe",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "name": "rpf",
+      "code": 0,
+      "seconds": 1.58,
+      "harness_counts": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      "reported_runtime_skips": [],
+      "command": [
+        "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine",
+        "--bottle",
+        "XCL",
+        "--",
+        "<checkout>/target/x86_64-pc-windows-gnullvm/release/deps/rpf_e2e-2339f0f258dc44fb.exe",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "name": "compute",
+      "code": 0,
+      "seconds": 1.13,
+      "harness_counts": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      "reported_runtime_skips": [],
+      "command": [
+        "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine",
+        "--bottle",
+        "XCL",
+        "--",
+        "<checkout>/target/x86_64-pc-windows-gnullvm/release/deps/gpu_compute_e2e-e46f3083581a9f99.exe",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "name": "mesh",
+      "code": 0,
+      "seconds": 0.82,
+      "harness_counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "reported_runtime_skips": [],
+      "command": [
+        "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine",
+        "--bottle",
+        "XCL",
+        "--",
+        "<checkout>/target/x86_64-pc-windows-gnullvm/release/deps/xcl-aced5a747b0f2c3f.exe",
+        "--exact",
+        "gpu::recomp::tests::gpu_mesh_mode_two_passes",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "name": "geometry",
+      "code": 0,
+      "seconds": 0.82,
+      "harness_counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "reported_runtime_skips": [],
+      "command": [
+        "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine",
+        "--bottle",
+        "XCL",
+        "--",
+        "<checkout>/target/x86_64-pc-windows-gnullvm/release/deps/xcl-aced5a747b0f2c3f.exe",
+        "--exact",
+        "gpu::recomp::tests::gpu_geometry_mode_es_gs_strip",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "name": "graphics",
+      "code": 0,
+      "seconds": 0.75,
+      "harness_counts": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "reported_runtime_skips": [],
+      "command": [
+        "/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine",
+        "--bottle",
+        "XCL",
+        "--",
+        "<checkout>/target/x86_64-pc-windows-gnullvm/release/deps/xcl-aced5a747b0f2c3f.exe",
+        "--exact",
+        "gpu::recomp::tests::gpu_graphics_vs_ps_draw",
+        "--nocapture",
+        "--test-threads=1"
+      ]
+    },
+    {
+      "name": "lib-suite",
+      "code": 101,
+      "seconds": 22.8,
+      "harness_counts": {
+        "passed": 649,
+        "failed": 21,
+        "ignored": 23
+      },
+      "reported_runtime_skips": [
+        "gpu::recomp::tests::gpu_geometry_wave32_prefix_count_over_a_mask",
+        "gpu::recomp::tests::gpu_retail_vs_blit_gen_amb_cube",
+        "gpu::recomp::tests::gpu_wave32_program_in_wave64_hardware",
+        "gpu::shader::tests::readable_answers_from_the_working_set_without_touching_pages",
+        "gpu::texture::tests::retail_ttpf_textures_detile_with_their_mip_chains",
+        "hle::d3d12x::title_textures::tests::placed_title_textures_share_vram_and_preserve_pixels",
+        "hle::opus::tests::decode_awc_block_preskip_rate_and_flush",
+        "hle::opus::tests::decode_ogg_eos_matches_raw_pcm_window_mono_and_stereo",
+        "hle::opus::tests::decode_silk_hybrid_celt_all_frame_sizes",
+        "hle::opus::tests::decode_stereo_and_multistream_5_1",
+        "hle::opus::tests::decodes_a_game_sound",
+        "hle::xaudio2::tests::opus_source_voice_decodes_and_manages_lifetime",
+        "hle::xgameruntime::api::tests::thunk_protocol_with_xcl_objects_on_pc_queues",
+        "shaders::tests::retail_pack_sample"
+      ],
+      "command": [
+        "<checkout>/scripts/macos.sh",
+        "wine",
+        "<checkout>/target/x86_64-pc-windows-gnullvm/release/deps/xcl-aced5a747b0f2c3f.exe",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "failing_tests": [
+        "gpu::recomp::tests::gpu_atomic_fcmpswap_x2",
+        "gpu::recomp::tests::gpu_atomic_fmin_fmax_x2",
+        "gpu::recomp::tests::gpu_clamp_and_omod_per_instruction",
+        "gpu::recomp::tests::gpu_f64_class_compare",
+        "gpu::recomp::tests::gpu_f64_compares_with_nan",
+        "gpu::recomp::tests::gpu_f64_literal_high_word",
+        "gpu::recomp::tests::gpu_f64_math_random",
+        "gpu::recomp::tests::gpu_f64_roots",
+        "gpu::recomp::tests::gpu_f64_rounding_and_conversions",
+        "gpu::recomp::tests::gpu_float_compares_random",
+        "gpu::recomp::tests::gpu_frexp_f64_exp_and_mant",
+        "gpu::recomp::tests::gpu_ldexp_f64",
+        "gpu::recomp::tests::gpu_more_atomics_sub_dword_scratch_valu",
+        "gpu::recomp::tests::gpu_ps_image_sample_offset_implicit_lod_between_mips",
+        "gpu::recomp::tests::gpu_rndne_f64",
+        "gpu::recomp::tests::gpu_uma_import_check_at_init",
+        "gpu::recomp::tests::gpu_valu_16_and_64_bit",
+        "hle::d3d12x::list_x::tests::timestamps_outside_unified_memory_land_after_the_queue",
+        "hle::d3d12x::present::frame_dump_tests::mapped_frame_dump_distinguishes_dark_bright_and_undecoded_content",
+        "hle::d3d12x::real::readback_routing_tests::coherent_buffer_sanitizes_console_flags_and_state",
+        "hle::xaudio2::tests::xma2_source_voice_decodes_and_manages_lifetime"
+      ]
+    },
+    {
+      "name": "title",
+      "code": 101,
+      "seconds": 9.9,
+      "harness_counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      },
+      "reported_runtime_skips": [],
+      "command": [
+        "<checkout>/scripts/macos.sh",
+        "wine",
+        "<checkout>/target/x86_64-pc-windows-gnullvm/release/deps/e2e-6d4b6fb6a65451ba.exe",
+        "--exact",
+        "test_title_runs_and_game_folder_is_untouched",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "failed_checks": [
+        "[FAIL] user32: a top-level window made either way (CreateWindowExW / A) is the hidden 1920x1080 console screen: W: not cloaked",
+        "[FAIL] D3D12.X: console command list memory methods (writes, timestamp, fill, copy, KickoffX, Wait32/64): Write32BitValueBottomOfPipeX: 0x0",
+        "[FAIL] D3D12.X: sparse VRAM buffer heaps (placed aliasing, persistent Map coherence, readback): persistent Map mutation did not reach GPU: 0x11223344",
+        "[FAIL] D3D12.X: coherent window headroom (CUSTOM+WRITE_BACK & oversized READBACK in sparse VRAM): CUSTOM+WRITE_BACK COPY_DEST Map(NULL) readback mismatch: 0x0 0x0",
+        "[FAIL] D3D12.X: async ring-buffered sparse uploads (80 MiB across 20 submits + reused-tile zeroing): submit 0 head mismatch: got 0x0, want 0xa5000000",
+        "[FAIL] DirectStorage (xcrdapi): a file read into memory, status + D3D12 fence: the DirectStorage fence was not signalled",
+        "[FAIL] XAudio2: console flags/device, XMA2 & Opus voices decoded, PCM passes, callbacks: XMA2 GetState: ctx=0x0, queued=1"
+      ]
+    }
+  ],
+  "not_tested": [
+    "native ARM64 runtime (not implemented)",
+    "Windows regression run",
+    "retail game (no game path supplied)",
+    "full workspace suite (library suite and selected integration tests were run)"
+  ]
+}
