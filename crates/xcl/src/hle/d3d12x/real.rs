@@ -5788,3 +5788,74 @@ mod console_format_query_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod shadow_upload_wait_tests {
+    use super::*;
+    use crate::hle::d3d12x::{list_x, sparse};
+
+    // Synthetic regression from the 2026-11-25 MacBox DMA visibility probes. No game data.
+    #[test]
+    fn gpu_shadow_upload_wait_preserves_dma_copy() {
+        const TEST: &str = "hle::d3d12x::real::shadow_upload_wait_tests::gpu_shadow_upload_wait_preserves_dma_copy";
+        if !crate::util::mac_host() { crate::gpu::recomp::runner::skip_test("needs Mac shadowed sparse UMA"); return; }
+        if std::env::var_os("XCL_TEST_SHADOW_UPLOAD_WAIT_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                .env("XCL_TEST_SHADOW_UPLOAD_WAIT_CHILD", "1").env("XCL_SHADOW_UPLOAD_WAIT", "1")
+                .output().unwrap();
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "shadow upload child failed: {}", output.status);
+            return;
+        }
+        if crate::gpu::recomp::runner::adapter().is_err() { crate::gpu::recomp::runner::skip_test("no GPU"); return; }
+        init().expect("real D3D12 backend");
+        let u = crate::gpu::uma::get().expect("UMA");
+        if !u.shadowed() || !u.has_sparse() { crate::gpu::recomp::runner::skip_test("needs shadowed sparse UMA"); return; }
+        unsafe {
+            const BYTES: usize = 0x1_0000;
+            struct Block(usize);
+            impl Drop for Block { fn drop(&mut self) { unsafe { sparse::free(self.0); } } }
+            let raw_dev = device_raw();
+            let dev = ID3D12Device::from_raw_borrowed(&raw_dev).unwrap().clone();
+            let mem = Block(sparse::alloc(BYTES, BYTES).expect("source allocation").0);
+            let desc = D3D12_RESOURCE_DESC { Dimension: D3D12_RESOURCE_DIMENSION_BUFFER, Width: BYTES as u64, Height: 1,
+                DepthOrArraySize: 1, MipLevels: 1, SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR, ..Default::default() };
+            let iid: GUID = std::mem::transmute(ID3D12Resource::IID);
+            let mut raw = std::ptr::null_mut();
+            let hr = place_at_title_address(raw_dev, mem.0, &*(&desc as *const _ as *const [u8; 0x38]), 0, std::ptr::null(), &iid, &mut raw).expect("source route");
+            assert!(hr >= 0 && !raw.is_null(), "source HRESULT={hr:#x}");
+            let src = ID3D12Resource::from_raw(raw);
+            let props = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_READBACK, ..Default::default() };
+            raw = std::ptr::null_mut();
+            let hr = place_console_buffer(raw_dev, &props as *const _ as usize, &desc as *const _ as usize,
+                D3D12_RESOURCE_STATE_COPY_DEST.0 as usize, 0, &iid, &mut raw).expect("destination route");
+            assert!(hr >= 0 && !raw.is_null(), "destination HRESULT={hr:#x}");
+            let dst = ID3D12Resource::from_raw(raw);
+            assert!(u.is_committed(console_buffer(dst.as_raw() as usize).unwrap().0), "needs coherent readback window");
+            let ty = D3D12_COMMAND_LIST_TYPE_COPY;
+            let queue: ID3D12CommandQueue = dev.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: ty, ..Default::default() }).unwrap();
+            assert_eq!(kind_of(vt(queue.as_raw()) as usize), Some(Kind::CommandQueue));
+            let expected: Vec<u32> = (0..BYTES / 4).map(|i| 0xC0DE_0000 | i as u32).collect();
+            std::ptr::copy_nonoverlapping(expected.as_ptr(), mem.0 as *mut u32, expected.len());
+            let alloc: ID3D12CommandAllocator = dev.CreateCommandAllocator(ty).unwrap();
+            let list: ID3D12GraphicsCommandList = dev.CreateCommandList(0, ty, &alloc, None).unwrap();
+            list_x::on_create(list.as_raw(), alloc.as_raw() as usize, 0, ty);
+            readopt(list.as_raw(), Kind::DmaList);
+            list_x::copy_buffer_region_x(list.as_raw(), dst.as_raw() as usize, 0, src.as_raw() as usize, 0, BYTES as u64);
+            list.Close().unwrap();
+            let cl: ID3D12CommandList = list.cast().unwrap();
+            // No manual upload, pre-submit fence or own_work bypass: exercise the queue wrapper.
+            queue.ExecuteCommandLists(&[Some(cl)]);
+            crate::gpu::texture::wait(&dev, &queue).unwrap();
+            let mut p = std::ptr::null_mut();
+            dst.Map(0, None, Some(&mut p)).unwrap();
+            let got = std::slice::from_raw_parts(p as *const u32, expected.len()).to_vec();
+            dst.Unmap(0, None);
+            assert_eq!(got.iter().zip(&expected).position(|(a, b)| a != b), None,
+                "wrapped DMA copy lost uploaded bytes; first words {:08x?}", &got[..4]);
+        }
+    }
+}

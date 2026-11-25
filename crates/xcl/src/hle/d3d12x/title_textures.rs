@@ -717,8 +717,30 @@ pub(super) unsafe fn refresh(queue: *mut c_void) {
     if BUSY.with(|b| b.get()) {
         return;
     }
-    let _refresh = REFRESH.lock().unwrap();
-    own_work(|| refresh_once(queue));
+    {
+        let _refresh = REFRESH.lock().unwrap();
+        own_work(|| refresh_once(queue));
+    }
+    // MacBox DMA probes (2026-11-25): Signal alone left the copy reading zero; completing
+    // the upload before submission preserved all bytes. Opt-in only, with no lock held.
+    if !shadow_upload_wait() || !crate::gpu::uma::get().is_some_and(|u| u.shadowed() && u.has_sparse()) {
+        return;
+    }
+    static FIRST: std::sync::Once = std::sync::Once::new();
+    FIRST.call_once(|| crate::xlog_info!("D3D12.X: Mac shadow upload completion wait enabled"));
+    let result = (|| -> Result<(), String> {
+        let q = ID3D12CommandQueue::from_raw_borrowed(&queue).ok_or("null shadow upload queue")?;
+        let mut dev: Option<ID3D12Device> = None;
+        q.GetDevice(&mut dev).map_err(|e| format!("GetDevice failed ({:#010x}): {e}", e.code().0 as u32))?;
+        let dev = dev.ok_or("shadow upload queue returned no device")?;
+        texture::wait(&dev, q)
+    })();
+    if let Err(e) = result { crate::xlog_warn!("D3D12.X: shadow upload completion wait failed: {e}"); }
+}
+
+fn shadow_upload_wait() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::util::mac_host() && std::env::var("XCL_SHADOW_UPLOAD_WAIT").as_deref() == Ok("1"))
 }
 
 unsafe fn refresh_once(queue: *mut c_void) {
