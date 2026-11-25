@@ -535,6 +535,12 @@ impl Em {
         std::mem::take(&mut self.out)
     }
 
+    /// Reset temporary numbering for compact block text sharing. Adapted from XCL (GPL-2.0-only),
+    /// https://github.com/xcl-dev/xcl/pull/1315, c195f07d6afa679764443e86c2776513da32a325 (2026-11-25).
+    pub fn reset_temps(&mut self) -> usize {
+        std::mem::take(&mut self.tmp)
+    }
+
     fn line(&mut self, s: &str) {
         for _ in 0..self.indent {
             self.out.push_str("    ");
