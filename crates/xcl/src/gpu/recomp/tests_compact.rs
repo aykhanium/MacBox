@@ -10,6 +10,8 @@
 //!
 //! Adapted from XCL (GPL-2.0-only), https://github.com/xcl-dev/xcl/pull/1315
 //! head c195f07d6afa679764443e86c2776513da32a325, retrieved 2026-11-25.
+//! Shared branch targets adapted from XCL (GPL-2.0-only), PR #1448:
+//! https://github.com/xcl-dev/xcl/pull/1448, 57d7574296369b6b050fc0a5b47e577e8ff73340 (2026-11-25).
 
 use std::collections::HashMap;
 
@@ -105,12 +107,14 @@ fn bytes(r: &KernelResult) -> Vec<u8> {
 /// the split form's upper-half SGPRs) followed by the memory afterwards, as bytes, of each.
 fn both_backends(code: &[u8], opt: &Options, inputs: &Inputs) -> (Vec<u8>, Vec<u8>) {
     let (normal, compact) = both_translations(code, opt);
-    let run = |t: &Translation, backend: &str| {
-        let dxil = compiled(t, backend);
-        let r = runner::run_with_statics(&dxil, &inputs.state, &inputs.mem, &[], &[], &t.static_samplers).unwrap_or_else(|e| panic!("{backend}: run: {e}"));
-        bytes(&r)
-    };
-    (run(&normal, "translate"), run(&compact, "translate_compact"))
+    (ran(&normal, "translate", inputs), ran(&compact, "translate_compact", inputs))
+}
+
+/// `t` compiled and run on `inputs`: its result (`bytes` layout).
+fn ran(t: &Translation, backend: &str, inputs: &Inputs) -> Vec<u8> {
+    let dxil = compiled(t, backend);
+    let r = runner::run_with_statics(&dxil, &inputs.state, &inputs.mem, &[], &[], &t.static_samplers).unwrap_or_else(|e| panic!("{backend}: run: {e}"));
+    bytes(&r)
 }
 
 /// Name of result dword `i` (`bytes` layout).
@@ -179,9 +183,15 @@ impl Dispatch {
             s[..s.find(end).unwrap()].to_string()
         };
         let n: usize = after("        if (xcl_nb >= ", "u) break;").parse().unwrap();
-        // switch ((XCL_BT[xcl_b / {per}u] >> (xcl_b % {per}u * {bits}u)) & {mask}u)
-        let per: usize = after("switch ((XCL_BT[xcl_b / ", "u]").parse().unwrap();
-        let bits: u32 = after(&format!("(xcl_b % {per}u * "), "u))").parse().unwrap();
+        // switch ((XCL_BT[xcl_b / {per}u] >> (xcl_b % {per}u * {bits}u)) & {mask}u), or packed
+        // across words: uint xcl_p = xcl_b * {bits}u; switch (((XCL_BT[xcl_p >> 5u] >> …
+        let dense = h.contains("        uint xcl_p = xcl_b * ");
+        let (per, bits): (usize, u32) = if dense {
+            (0, after("        uint xcl_p = xcl_b * ", "u;").parse().unwrap())
+        } else {
+            let per = after("switch ((XCL_BT[xcl_b / ", "u]").parse().unwrap();
+            (per, after(&format!("(xcl_b % {per}u * "), "u))").parse().unwrap())
+        };
         let table = after("static const uint XCL_BT[", "};");
         let words: Vec<u32> = table[table.find('{').unwrap() + 1..]
             .split(',')
@@ -189,10 +199,22 @@ impl Dispatch {
             .filter(|w| !w.is_empty())
             .map(|w| u32::from_str_radix(w.trim_start_matches("0x").trim_end_matches('u'), 16).unwrap())
             .collect();
-        let class: Vec<usize> = (0..n).map(|b| ((words[b / per] >> (b % per) as u32 * bits) & ((1u32 << bits) - 1)) as usize).collect();
+        let mask = (1u64 << bits) - 1;
+        let class: Vec<usize> = (0..n)
+            .map(|b| {
+                let v = if dense {
+                    let (w, s) = (b * bits as usize / 32, b * bits as usize % 32);
+                    (words[w] as u64 | (words[w + 1] as u64) << 32) >> s
+                } else {
+                    (words[b / per] >> (b % per) as u32 * bits) as u64
+                };
+                (v & mask) as usize
+            })
+            .collect();
         let mut cases: Vec<(u64, String)> = Vec::new();
         let mut open = false;
-        for l in h[h.find("switch ((XCL_BT[").unwrap()..].lines().skip(1) {
+        let switch = h.find(if dense { "switch (((XCL_BT[" } else { "switch ((XCL_BT[" }).unwrap();
+        for l in h[switch..].lines().skip(1) {
             if let Some(rest) = l.strip_prefix("        case ") {
                 let (k, pc) = rest.split_once("u: { // ").unwrap_or_else(|| panic!("case line {l:?}"));
                 assert_eq!(k.parse::<usize>().unwrap(), cases.len(), "cases in order");
@@ -240,6 +262,45 @@ impl Dispatch {
     /// The cases with the line `l` (indentation of a case's text included).
     fn with_line(&self, l: &str) -> Vec<usize> {
         (0..self.cases.len()).filter(|&c| self.cases[c].1.lines().any(|x| x == l)).collect()
+    }
+
+    /// Where case `c` sends `block` (an index, as `class` has them), read from the case's lines
+    /// the way the GPU runs them: the target, the selects run for it and the `[branch] if`s it
+    /// goes through. Only what follows `uint xcl_t` is read: the offset, then the tree.
+    fn target(&self, c: usize, block: usize) -> (usize, usize, usize) {
+        let num = |s: &str| -> usize { s.trim_end_matches(';').trim_end_matches(')').trim_end_matches('{').trim().trim_end_matches('u').parse().unwrap() };
+        let mut to = None;
+        let (mut selects, mut ifs) = (0, 0);
+        // per open `if`: (its parent runs, its condition, its side runs)
+        let mut open: Vec<(bool, bool, bool)> = Vec::new();
+        for l in self.cases[c].1.lines().map(str::trim) {
+            let live = open.last().map_or(true, |f| f.2);
+            if let Some(rest) = l.strip_prefix("uint xcl_t = xcl_b ") {
+                let (sign, n) = rest.split_once(' ').unwrap();
+                to = Some(if sign == "+" { block + num(n) } else { block - num(n) });
+            } else if to.is_none() {
+                continue;
+            } else if let Some(rest) = l.strip_prefix("[branch] if (xcl_b < ") {
+                let below = block < num(rest.split_once(')').unwrap().0);
+                open.push((live, below, live && below));
+                ifs += live as usize;
+            } else if l == "} else {" {
+                let f = open.last_mut().unwrap();
+                f.2 = f.0 && !f.1;
+            } else if l == "}" {
+                open.pop().unwrap();
+            } else if let Some(rest) = l.strip_prefix("xcl_t = select(xcl_b == ") {
+                let v: Vec<&str> = rest.split(", ").collect();
+                selects += live as usize;
+                if live && num(v[0]) == block {
+                    to = Some(num(v[1]));
+                }
+            }
+        }
+        assert!(open.is_empty(), "unbalanced ifs in:
+{}", self.cases[c].1);
+        (to.unwrap_or_else(|| panic!("no xcl_t in:
+{}", self.cases[c].1)), selects, ifs)
     }
 }
 
@@ -463,6 +524,68 @@ fn repeated_blocks() -> Vec<u8> {
 fn repeated_shape(d: &Dispatch, _: &Options) {
     assert!(d.cases.len() < d.blocks(), "{} cases, {} blocks", d.cases.len(), d.blocks());
     assert!((0..d.cases.len()).any(|c| d.uses(c) >= 3), "table {:?}", d.class);
+}
+
+/// The same block (`X`: VALU + scalar work ending in `s_cbranch_scc1`) twice, branching
+/// forward over a block from the first and back to the first from the second: one case with
+/// two targets. s10 runs 2, 5, 8, 11, 14, so both branches are taken and both fall through.
+fn shared_targets() -> Vec<u8> {
+    fn x<'a>(a: &'a mut Asm, to: &'static str) -> &'a mut Asm {
+        a.i("V_ADD_NC_U32", "ENC_VOP2", &[("VDST", 2), ("SRC0", V), ("VSRC1", 2)], None)
+            .i("V_MUL_LO_U32", "ENC_VOP3", &[("VDST", 3), ("SRC0", V + 2), ("SRC1", V + 3)], None)
+            .i("S_ADD_U32", "ENC_SOP2", &[("SDST", 10), ("SSRC0", 10), ("SSRC1", 131)], None)
+            .i("S_CMP_LT_U32", "ENC_SOPC", &[("SSRC0", 10), ("SSRC1", 139)], None)
+            .br("S_CBRANCH_SCC1", to)
+    }
+    let mut a = Asm::default();
+    a.i("S_MOV_B32", "ENC_SOP1", &[("SDST", 10), ("SSRC0", 130)], None).label("top");
+    x(&mut a, "mid").i("V_OR_B32", "ENC_VOP2", &[("VDST", 4), ("SRC0", 129), ("VSRC1", 4)], None).label("mid");
+    x(&mut a, "top").i("V_OR_B32", "ENC_VOP2", &[("VDST", 4), ("SRC0", 130), ("VSRC1", 4)], None);
+    a.end()
+}
+
+/// `shared_targets` in the compact form: the two copies of `X` are one case, which picks the
+/// second one's target by its block index.
+fn shared_targets_shape(d: &Dispatch, _: &Options) {
+    let c = d.only("xcl_t = select(xcl_b == ");
+    assert_eq!(d.uses(c), 2, "table {:?}", d.class);
+    assert_eq!(d.cases[c].1.matches("select(xcl_b == ").count(), 1, "{}", d.cases[c].1);
+}
+
+/// Copies of `many_targets`: more than twice the selects a case evaluates.
+const MANY: usize = 2 * compact::MAX_SELECTS;
+
+/// The copy `many_targets` jumps to from copy `i` (`MANY`: the end).
+fn many_target(i: usize) -> usize {
+    (i + 2 + i % 6).min(MANY)
+}
+
+/// `MANY` copies of one block (VALU + scalar work, `s_and` of the running sum with 4, then
+/// `s_cbranch_scc1`) one after the other: each ends in a branch, so each is a block of its own
+/// and all share a text. Copy `i` jumps to copy `many_target(i)`, so no more than a sixth of
+/// them jump by the same distance and the rest of the case's targets are selects. Some jump
+/// and some fall through (bit 2 of s10, which grows by 3 per copy that runs).
+fn many_targets() -> Vec<u8> {
+    fn name(i: usize) -> &'static str {
+        Box::leak(format!("copy{i}").into_boxed_str())
+    }
+    let mut a = Asm::default();
+    for i in 0..MANY {
+        a.label(name(i))
+            .i("V_ADD_NC_U32", "ENC_VOP2", &[("VDST", 2), ("SRC0", V), ("VSRC1", 2)], None)
+            .i("V_MUL_LO_U32", "ENC_VOP3", &[("VDST", 3), ("SRC0", V + 2), ("SRC1", V + 3)], None)
+            .i("S_ADD_U32", "ENC_SOP2", &[("SDST", 10), ("SSRC0", 10), ("SSRC1", 131)], None)
+            .i("S_AND_B32", "ENC_SOP2", &[("SDST", 11), ("SSRC0", 10), ("SSRC1", 132)], None)
+            .br("S_CBRANCH_SCC1", name(many_target(i)));
+    }
+    a.label(name(MANY)).end()
+}
+
+/// `many_targets` in the compact form: one case holds the copies' branches, with a `[branch] if`
+/// on the block index.
+fn many_targets_shape(d: &Dispatch, _: &Options) {
+    let c = d.only("[branch] if (xcl_b < ");
+    assert!(d.uses(c) >= MANY, "table {:?}", d.class);
 }
 
 /// Far jumps (s_getpc_b64, add / sub of a literal, s_setpc_b64): a backward one closes a loop,
@@ -781,6 +904,7 @@ fn compact_and_normal_forms_compile() {
     let programs = [
         ("execz nest", execz_nest()),
         ("repeated blocks", repeated_blocks()),
+        ("shared targets", shared_targets()),
         ("far jumps", far_jumps()),
         ("exchange repeated", exchange_repeated()),
         ("buffer_load_format_x repeated", load_x_repeated()),
@@ -818,6 +942,89 @@ fn gpu_compact_backward_loops() {
     let inputs = Inputs::lanes(Vec::new()).vgpr(6, |l| hash(l, 6));
     assert_shape("backward loops", &backward_loops(), true, dispatched);
     assert_same("backward loops", &backward_loops(), &inputs, true);
+}
+
+/// The select chain of a case with many targets is cut: every block of `many_targets` gets its
+/// target through at most `MAX_SELECTS` selects and `ceil(log2(leaves))` ifs. Before, each ran
+/// the whole chain, one select per block of the minority and no `[branch] if`.
+#[test]
+fn compact_many_targets_take_a_bounded_path() {
+    let code = many_targets();
+    let opt = Options::default();
+    let both = [("translate_compact", compact::translate_compact(&code, &opt)), ("every instruction a block", compact::compact(&code, &opt, 0, 0))];
+    for (what, t) in both {
+        let d = Dispatch::of(&t.unwrap_or_else(|e| panic!("{what}: {e}")));
+        let c = d.only("[branch] if (xcl_b < ");
+        let all = d.cases[c].1.matches("xcl_t = select(xcl_b == ").count();
+        assert!(all > compact::MAX_SELECTS, "{what}: {all} selects in all");
+        let leaves = all.div_ceil(compact::MAX_SELECTS);
+        let depth = (usize::BITS - (leaves - 1).leading_zeros()) as usize;
+        // a block per copy (translate_compact), or one per instruction; then the end
+        let per = (d.blocks() - 1) / MANY;
+        assert_eq!(d.blocks(), per * MANY + 1, "{what}");
+        let mine: Vec<usize> = (0..d.blocks()).filter(|&b| d.class[b] == c).collect();
+        assert_eq!(mine.len(), MANY, "{what}: blocks of the case");
+        let (mut most_selects, mut most_ifs) = (0, 0);
+        for (j, &b) in mine.iter().enumerate() {
+            let (to, selects, ifs) = d.target(c, b);
+            assert_eq!(to, per * many_target(j), "{what}: copy {j} (block {b})");
+            assert!(selects <= compact::MAX_SELECTS && ifs <= depth, "{what}: copy {j}: {selects} selects, {ifs} ifs (at most {} and {depth})", compact::MAX_SELECTS);
+            (most_selects, most_ifs) = (most_selects.max(selects), most_ifs.max(ifs));
+        }
+        assert!(most_ifs >= 1, "{what}: no block goes through an if");
+        println!("{what}: {all} selects in the case, a path has at most {most_selects} selects and {most_ifs} ifs");
+    }
+}
+
+#[test]
+fn gpu_compact_many_targets() {
+    if !gpu_ready() {
+        return;
+    }
+    let inputs = Inputs::lanes(Vec::new()).vgpr(2, |l| hash(l, 2)).vgpr(3, |l| hash(l, 3) | 1);
+    assert_shape("many targets", &many_targets(), true, many_targets_shape);
+    assert_same("many targets", &many_targets(), &inputs, true);
+}
+
+#[test]
+fn gpu_compact_shared_targets() {
+    if !gpu_ready() {
+        return;
+    }
+    let inputs = Inputs::lanes(Vec::new()).vgpr(2, |l| hash(l, 2)).vgpr(3, |l| hash(l, 3) | 1);
+    assert_shape("shared targets", &shared_targets(), true, shared_targets_shape);
+    assert_same("shared targets", &shared_targets(), &inputs, true);
+}
+
+/// A table packed across words (`compact::compact` past `dense_above`) gives every block the
+/// case the usual packing gives it, and the program runs as `translate`'s does. Every
+/// instruction is a block of its own (`heavy` 0), so some cases straddle words.
+#[test]
+fn gpu_compact_dense_table() {
+    if !gpu_ready() {
+        return;
+    }
+    let inputs = Inputs::lanes(Vec::new()).vgpr(1, |l| hash(l, 1)).vgpr(2, |l| hash(l, 2)).vgpr(3, |l| hash(l, 3) | 1).vgpr(6, |l| hash(l, 6));
+    let mut straddled = 0;
+    let programs = [("shared targets", shared_targets()), ("many targets", many_targets()), ("repeated blocks", repeated_blocks()), ("execz nest", execz_nest()), ("backward loops", backward_loops())];
+    for (what, code) in programs {
+        for (form, opt) in forms(true) {
+            let packed = compact::compact(&code, &opt, 0, usize::MAX).unwrap_or_else(|e| panic!("{what} ({form}): {e}"));
+            let dense = compact::compact(&code, &opt, 0, 0).unwrap_or_else(|e| panic!("{what} ({form}): {e}"));
+            let (p, d) = (Dispatch::of(&packed), Dispatch::of(&dense));
+            assert!(!packed.hlsl.contains("xcl_p") && dense.hlsl.contains("uint xcl_p = xcl_b * "), "{what} ({form})");
+            let bits = (usize::BITS - (d.cases.len() - 1).leading_zeros()) as usize;
+            straddled += (0..d.blocks()).filter(|b| b * bits % 32 + bits > 32).count();
+            assert_eq!((&p.class, &p.cases), (&d.class, &d.cases), "{what} ({form})");
+            let want = ran(&translate(&code, &opt).unwrap(), "translate", &inputs);
+            let got = ran(&dense, "compact, packed across words", &inputs);
+            let diff = differences(&want, &got, slot);
+            assert!(diff.is_empty(), "{what} ({form}): translate / packed table differ:\n{}", diff.join("\n"));
+            println!("{what} ({form}): {} blocks, {} cases, {} result bytes identical", d.blocks(), d.cases.len(), got.len());
+        }
+    }
+    assert!(straddled > 0, "no case straddles a word");
+    println!("{straddled} blocks' cases straddle a word");
 }
 
 #[test]
