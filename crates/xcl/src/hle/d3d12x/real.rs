@@ -2573,6 +2573,7 @@ fn overrides(kind: Kind) -> Vec<(&'static str, usize)> {
             ("Release", cl_release as usize),
             ("Close", cl_close as usize),
             ("Reset", cl_reset as usize),
+            ("SetPredication", cl_set_predication as usize),
             ("ClearState", cl_clear_state as usize),
             ("DrawInstanced", cl_draw_instanced as usize),
             ("DrawIndexedInstanced", cl_draw_indexed_instanced as usize),
@@ -2661,6 +2662,13 @@ unsafe extern "system" fn cl_close(this: *mut c_void) -> HRESULT {
     hr
 }
 
+unsafe extern "system" fn cl_set_predication(this: *mut c_void, buffer: usize, offset: u64, op: D3D12_PREDICATION_OP) {
+    let f: unsafe extern "system" fn(*mut c_void, usize, u64, D3D12_PREDICATION_OP) =
+        std::mem::transmute(orig_fn(this, slot_of(this, "SetPredication")));
+    f(this, buffer, offset, op);
+    super::list_x::on_pc_predication(this, buffer);
+}
+
 /// Reset (PC path): re-adopt the runtime's new open-state vtable if Reset replaced it.
 unsafe extern "system" fn cl_reset(this: *mut c_void, allocator: *mut c_void, initial_state: *mut c_void) -> HRESULT {
     let ext = *(this as *const usize);
@@ -2670,7 +2678,7 @@ unsafe extern "system" fn cl_reset(this: *mut c_void, allocator: *mut c_void, in
     let hr = f(this, allocator, resolved);
     preserve_vtable(this, ext);
     if hr >= 0 {
-        super::list_x::on_pc_reset(this);
+        super::list_x::on_pc_reset(this, allocator as usize);
     }
     hr
 }
@@ -4864,6 +4872,7 @@ unsafe extern "system" fn alloc_reset(this: *mut c_void) -> HRESULT {
     if hr >= 0 {
         // the GPU is done with what lists recorded from this allocator used
         super::console_list::allocator_reset(this);
+        super::list_x::on_allocator_reset(this as usize);
     }
     hr
 }

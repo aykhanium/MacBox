@@ -550,6 +550,8 @@ struct ListState {
     cpu_writes: Vec<super::cpu_writes::Write>,
     /// Dedicated 256-byte buffer holding the current predicate value (created lazily in COMMON state).
     pred_buf: Option<ID3D12Resource>,
+    /// Native PC predicates cannot be restored from the console snapshot.
+    pc_predication: bool,
     /// True while `pred_buf` is in `D3D12_RESOURCE_STATE_PREDICATION` on this open recording.
     pred_in_state: bool,
     /// Active `SetPredicationBufferX` op, restored across `KickoffX`.
@@ -734,6 +736,7 @@ pub(super) fn has_list_state(list: usize) -> bool {
 
 /// Forget a released command allocator so `KickoffX` will not reset a list with a dead allocator.
 pub(super) fn on_allocator_release(alloc: usize) {
+    on_allocator_reset(alloc);
     if let Some(m) = LISTS.lock().unwrap().as_mut() {
         for s in m.values_mut() {
             if s.allocator == alloc {
@@ -811,6 +814,7 @@ pub(super) unsafe fn on_clear_state(list: *mut c_void, pso: usize) {
             s.index_buffer = None;
             s.depth_bounds = None;
             s.predication = None;
+            s.pc_predication = false;
             s.bindings = Bindings::default();
             s.list_type == Some(D3D12_COMMAND_LIST_TYPE_BUNDLE)
         } else {
@@ -1156,6 +1160,83 @@ unsafe fn write(list: *mut c_void, va: u64, words: &[u32], mode: D3D12_WRITEBUFF
     as_copy_dest(list, d, || pc::<F>(list, PC_WRITE_BUFFER_IMMEDIATE)(list, params.len() as u32, params.as_ptr(), modes.as_ptr()));
 }
 
+// Optional Mac MARKER_OUT workaround: immutable constants and conservative full-stall ordering.
+fn bottom_copy_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| crate::util::mac_host() && std::env::var("XCL_MAC_BOTTOM_WRITE_COPY").as_deref() == Ok("1"))
+}
+
+struct MarkerPage { resource: ID3D12Resource, mapped: usize, used: usize }
+static MARKER_PAGES: Mutex<Option<HashMap<usize, Vec<MarkerPage>>>> = Mutex::new(None);
+const MARKER_PAGE_BYTES: usize = 0x1_0000;
+
+pub(super) fn on_allocator_reset(allocator: usize) {
+    if !bottom_copy_enabled() { return; }
+    let pages = MARKER_PAGES.lock().unwrap().as_mut().and_then(|m| m.remove(&allocator));
+    drop(pages); // Release outside the lock; command-list Reset must retain these pages.
+}
+
+pub(super) fn on_pc_predication(list: *mut c_void, buffer: usize) {
+    if !bottom_copy_enabled() { return; }
+    if let Some(s) = LISTS.lock().unwrap().as_mut().and_then(|m| m.get_mut(&(list as usize))) {
+        s.pc_predication = buffer != 0;
+        s.predication = None;
+    }
+}
+
+unsafe fn marker_source(list: *mut c_void, allocator: usize, value: u32) -> Option<(usize, u64)> {
+    let mut all = MARKER_PAGES.lock().unwrap();
+    let pages = all.get_or_insert_with(HashMap::new).entry(allocator).or_default();
+    if pages.last().is_none_or(|p| p.used == MARKER_PAGE_BYTES) {
+        let dev = device_of(list)?;
+        let props = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_UPLOAD, ..Default::default() };
+        let desc = D3D12_RESOURCE_DESC { Dimension: D3D12_RESOURCE_DIMENSION_BUFFER, Width: MARKER_PAGE_BYTES as u64,
+            Height: 1, DepthOrArraySize: 1, MipLevels: 1, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR, ..Default::default() };
+        let mut raw = std::ptr::null_mut();
+        // Call the native creator, avoiding console UPLOAD redirection into shadowed UMA.
+        let hr = real::dev_create_committed_resource(dev.as_raw(), &props as *const _ as usize, 0,
+            &desc as *const _ as usize, D3D12_RESOURCE_STATE_GENERIC_READ.0 as usize, 0,
+            &ID3D12Resource::IID as *const _ as _, &mut raw);
+        if hr < 0 || raw.is_null() { return None; }
+        let resource = ID3D12Resource::from_raw(raw);
+        let mut mapped = std::ptr::null_mut();
+        resource.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }), Some(&mut mapped)).ok()?;
+        if mapped.is_null() { return None; }
+        pages.push(MarkerPage { resource, mapped: mapped as usize, used: 0 });
+    }
+    let page = pages.last_mut()?;
+    let offset = page.used;
+    ((page.mapped + offset) as *mut u32).write(value);
+    page.used += 4; // Append-only: previous submissions may still read all earlier slots.
+    Some((page.resource.as_raw() as usize, offset as u64))
+}
+
+unsafe fn copy_bottom32(list: *mut c_void, va: u64, value: u32) -> bool {
+    if !va.is_multiple_of(4) { return false; }
+    let Some((dst, offset)) = real::uma_window_buffer(va as usize, 4) else { return false };
+    let state = {
+        let g = LISTS.lock().unwrap();
+        g.as_ref().and_then(|m| m.get(&(list as usize))).filter(|s| s.allocator != 0 && !s.pc_predication && s.predication.is_none()
+            && s.list_type == Some(D3D12_COMMAND_LIST_TYPE_DIRECT))
+            .map(|s| s.allocator)
+    };
+    let Some(allocator) = state else { return false };
+    let Some((source, source_offset)) = marker_source(list, allocator, value) else {
+        static N: AtomicU64 = AtomicU64::new(0);
+        warn(&N, "Write32BitValueBottomOfPipeX copy", format_args!("native upload allocation failed"));
+        return false;
+    };
+    // Null/null legacy aliasing fully stalls preceding work; it changes no resource layout.
+    // https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html
+    let barrier = D3D12_RESOURCE_BARRIER { Type: D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 { Aliasing: ManuallyDrop::new(D3D12_RESOURCE_ALIASING_BARRIER::default()) }, ..Default::default() };
+    pc::<unsafe extern "system" fn(*mut c_void, u32, *const D3D12_RESOURCE_BARRIER)>(list, PC_RESOURCE_BARRIER)(list, 1, &barrier);
+    as_copy_dest(list, dst, || copy_buffer_region(list, dst, offset, source, source_offset, 4));
+    note_write(list as usize, va, 4);
+    true
+}
+
 /// timestamp queries (one heap per device, used round-robin) and a lazily created READBACK
 /// buffer for timestamps targeting memory outside unified memory
 struct TimestampPool {
@@ -1265,6 +1346,7 @@ unsafe fn timestamp(list: *mut c_void, va: u64, what: &str) {
 /// # Safety
 /// `this` must be a valid adopted `ID3D12GraphicsCommandList` pointer.
 pub unsafe extern "system" fn write32_bottom_x(this: *mut c_void, va: u64, value: u32, _flush: u32, _flags: u32) {
+    if bottom_copy_enabled() && copy_bottom32(this, va, value) { return; }
     write(this, va, &[value], D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT, "Write32BitValueBottomOfPipeX");
 }
 
@@ -1443,12 +1525,15 @@ pub(super) unsafe fn before_close(list: *mut c_void) {
 }
 
 /// Clear active predication state when `ID3D12GraphicsCommandList::Reset` resets a recording.
-pub(super) fn on_pc_reset(list: *mut c_void) {
-    if !PREDICATION_USED.load(Ordering::Acquire) || list.is_null() {
+pub(super) fn on_pc_reset(list: *mut c_void, allocator: usize) {
+    let copy = bottom_copy_enabled();
+    if (!PREDICATION_USED.load(Ordering::Acquire) && !copy) || list.is_null() {
         return;
     }
     if let Some(s) = LISTS.lock().unwrap().as_mut().and_then(|m| m.get_mut(&(list as usize))) {
+        if copy { s.allocator = allocator; }
         s.predication = None;
+        s.pc_predication = false;
         s.pred_in_state = false;
     }
 }
@@ -1463,7 +1548,7 @@ unsafe fn apply_predication_copy(this: *mut c_void, uma_buf: usize, off: u64, pb
         .unwrap()
         .as_ref()
         .and_then(|m| m.get(&(this as usize)))
-        .map_or((false, false), |s| (s.predication.is_some(), s.pred_in_state));
+        .map_or((false, false), |s| (s.predication.is_some() || s.pc_predication, s.pred_in_state));
     // Disarm any active predicate before copying the new predicate value so a failing predicate
     // does not suppress `CopyBufferRegion` when switching directly between buffers.
     if was_active {
@@ -1479,6 +1564,7 @@ unsafe fn apply_predication_copy(this: *mut c_void, uma_buf: usize, off: u64, pb
     PREDICATION_USED.store(true, Ordering::Release);
     if let Some(s) = LISTS.lock().unwrap().get_or_insert_with(HashMap::new).get_mut(&(this as usize)) {
         s.predication = Some(op);
+        s.pc_predication = false;
         s.pred_in_state = true;
     }
 }
@@ -1502,6 +1588,7 @@ pub unsafe extern "system" fn set_predication_buffer_x(this: *mut c_void, desc: 
             let mut g = LISTS.lock().unwrap();
             g.as_mut().and_then(|m| m.get_mut(&(this as usize))).and_then(|s| {
                 s.predication = None;
+                s.pc_predication = false;
                 if s.pred_in_state {
                     s.pred_in_state = false;
                     s.pred_buf.as_ref().map(|r| r.as_raw() as usize)
@@ -1636,6 +1723,7 @@ pub unsafe extern "system" fn kickoff_x(this: *mut c_void) {
 
     // Reset() cleared the PC list's native RSSetDepthBias state to (0, 0, 0) and bound init_pso.
     if let Some(s) = LISTS.lock().unwrap().as_mut().and_then(|m| m.get_mut(&(this as usize))) {
+        s.pc_predication = false;
         s.native_bias = DepthBias::ZERO;
         s.using_fallback_pso = false;
         s.pso_dirty = false;
@@ -2183,6 +2271,7 @@ pub unsafe extern "system" fn reset_x(this: *mut c_void, alloc: usize, pso: usiz
         s.clear_waits();
         s.cpu_writes.clear();
         s.predication = None;
+        s.pc_predication = false;
         s.pred_in_state = false;
         s.bindings = Bindings::default();
         s.list_type == Some(D3D12_COMMAND_LIST_TYPE_BUNDLE)
@@ -3683,7 +3772,7 @@ mod tests {
             // (g) on_pc_reset clears predication & pred_in_state so subsequent before_close emits 0 barriers.
             apply_predication_copy(list_ptr, uma_buf, 0x100, pb_raw, D3D12_PREDICATION_OP_EQUAL_ZERO);
             take_events();
-            on_pc_reset(list_ptr);
+            on_pc_reset(list_ptr, 0x100);
             before_close(list_ptr);
             assert!(take_events().is_empty(), "on_pc_reset must clear pred_in_state before before_close");
         }
@@ -3770,5 +3859,144 @@ mod tests {
 
             on_release(list_ptr as usize);
         }
+    }
+}
+
+#[cfg(test)]
+mod bottom_copy_regression {
+    use super::*;
+    const BYTES: usize = 0x1_0000;
+    const WORDS: usize = BYTES / 4;
+
+    #[test]
+    fn gpu_bottom32_copy_unpredicated_guards_allocator_lifetime() {
+        if !crate::util::mac_host() { crate::gpu::recomp::runner::skip_test("needs Mac host"); return; }
+        if std::env::var_os("XCL_TEST_BOTTOM_COPY_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "hle::d3d12x::list_x::bottom_copy_regression::gpu_bottom32_copy_unpredicated_guards_allocator_lifetime", "--nocapture", "--test-threads=1"])
+                .env("XCL_TEST_BOTTOM_COPY_CHILD", "1")
+                .env("XCL_MAC_BOTTOM_WRITE_COPY", "1")
+                .env("XCL_SHADOW_UPLOAD_WAIT", "1").output().unwrap();
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "bottom copy child: {}", output.status);
+            return;
+        }
+        if crate::gpu::recomp::runner::adapter().is_err() { crate::gpu::recomp::runner::skip_test("no GPU"); return; }
+        real::init().unwrap();
+        let u = crate::gpu::uma::get().unwrap();
+        if !u.shadowed() || !u.has_sparse() { crate::gpu::recomp::runner::skip_test("needs shadowed sparse UMA"); return; }
+        unsafe { run(); }
+    }
+
+    unsafe fn run() {
+        struct Block(*mut c_void);
+        impl Drop for Block { fn drop(&mut self) { unsafe { crate::hle::kernelx::XMemFree(self.0, 1 << 29); } } }
+        let mem = Block(crate::hle::kernelx::XMemAlloc(BYTES, 1 << 29));
+        assert!(!mem.0.is_null());
+        let va = mem.0 as u64;
+        let dev_raw = real::device_raw();
+        let dev = ID3D12Device::from_raw_borrowed(&dev_raw).unwrap().clone();
+        let buffer = |heap, state| {
+            let props = D3D12_HEAP_PROPERTIES { Type: heap, ..Default::default() };
+            let desc = D3D12_RESOURCE_DESC { Dimension: D3D12_RESOURCE_DIMENSION_BUFFER, Width: BYTES as u64,
+                Height: 1, DepthOrArraySize: 1, MipLevels: 1, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR, ..Default::default() };
+            let mut raw = std::ptr::null_mut();
+            assert!(real::dev_create_committed_resource(dev.as_raw(), &props as *const _ as usize, 0,
+                &desc as *const _ as usize, state as usize, 0, &ID3D12Resource::IID as *const _ as _, &mut raw) >= 0);
+            ID3D12Resource::from_raw(raw)
+        };
+        let mut ptr = std::ptr::null_mut();
+        let mut expected: Vec<u32> = (0..WORDS).map(|i| 0xA5C0_0000 | i as u32).collect();
+        for i in [8, 11, 12, 13] { expected[i] = 0; }
+        std::ptr::copy_nonoverlapping(expected.as_ptr(), mem.0 as *mut u32, WORDS);
+        let queue: ID3D12CommandQueue = dev.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC::default()).unwrap();
+        let a: ID3D12CommandAllocator = dev.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap();
+        let b: ID3D12CommandAllocator = dev.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap();
+        let list: ID3D12GraphicsCommandList = dev.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &a, None).unwrap();
+        on_create(list.as_raw(), a.as_raw() as usize, 0, D3D12_COMMAND_LIST_TYPE_DIRECT);
+        let (dst, offset) = real::uma_window_buffer(va as usize, BYTES).unwrap();
+        super::super::title_textures::refresh(queue.as_raw());
+        crate::gpu::texture::wait(&dev, &queue).unwrap();
+        let enabled = bottom_copy_enabled();
+        if enabled {
+            for i in 0..WORDS - 1 { marker_source(list.as_raw(), a.as_raw() as usize, i as u32).unwrap(); }
+        }
+        let gate: ID3D12Fence = dev.CreateFence(0, D3D12_FENCE_FLAG_NONE).unwrap();
+        queue.Wait(&gate, 1).unwrap();
+        let mut readbacks = Vec::new();
+        let mut shared = None;
+        for pass in 0..3 {
+            let alloc = if pass < 2 { &a } else { &b };
+            if pass == 1 {
+                let other: ID3D12GraphicsCommandList = dev.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &a, None).unwrap();
+                on_create(other.as_raw(), a.as_raw() as usize, 0, D3D12_COMMAND_LIST_TYPE_DIRECT);
+                shared = Some(other);
+            }
+            if pass == 2 { list.Reset(&b, None).unwrap(); }
+            let list = if pass == 1 { shared.as_ref().unwrap() } else { &list };
+            if enabled { assert_eq!(LISTS.lock().unwrap().as_ref().unwrap()[&(list.as_raw() as usize)].allocator, alloc.as_raw() as usize); }
+            #[repr(C)] struct Predicate { address: u64, op: u32 }
+            let predicate = Predicate { address: va + 48, op: D3D12_PREDICATION_OP_EQUAL_ZERO.0 as u32 };
+            set_predication_buffer_x(list.as_raw(), &predicate as *const _ as *const u64);
+            let usage = || MARKER_PAGES.lock().unwrap().as_ref().map_or(0, |m| m.values().flatten().map(|p| p.used).sum::<usize>());
+            let used = usage();
+            assert!(!copy_bottom32(list.as_raw(), va + 64, 0xDEAD_BEEF), "console predication excludes fallback");
+            assert_eq!(usage(), used, "excluded command must allocate no source");
+            assert!(LISTS.lock().unwrap().as_ref().unwrap()[&(list.as_raw() as usize)].predication.is_some());
+            let pb = LISTS.lock().unwrap().as_ref().unwrap()[&(list.as_raw() as usize)].pred_buf.as_ref().unwrap().clone();
+            list.SetPredication(&pb, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+            assert!(!copy_bottom32(list.as_raw(), va + 64, 0xDEAD_BEEF), "native PC predication excludes fallback");
+            assert_eq!(usage(), used);
+            if enabled { assert!(LISTS.lock().unwrap().as_ref().unwrap()[&(list.as_raw() as usize)].pc_predication); }
+            list.SetPredication(None, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+            write32_bottom_x(list.as_raw(), va + 32, 0x1234_5678 ^ pass as u32, 0, 0);
+            write32_bottom_x(list.as_raw(), va + 44, 0x8765_4321 ^ pass as u32, 0, 0);
+            let rb = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST.0);
+            transition(list.as_raw(), dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            copy_buffer_region(list.as_raw(), rb.as_raw() as usize, 0, dst, offset, BYTES as u64);
+            transition(list.as_raw(), dst, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+            list.Close().unwrap();
+            type Execute = unsafe extern "system" fn(*mut c_void, u32, *const *mut c_void);
+            pc::<Execute>(queue.as_raw(), PC_QUEUE_EXECUTE_COMMAND_LISTS)(queue.as_raw(), 1, &list.as_raw());
+            readbacks.push(rb);
+        }
+        if enabled {
+            let pages = MARKER_PAGES.lock().unwrap();
+            let pages = pages.as_ref().unwrap();
+            assert_eq!(pages[&(a.as_raw() as usize)].len(), 2, "rollover, with old source retained across list Reset");
+            assert_eq!(pages[&(b.as_raw() as usize)].len(), 1, "new allocator owns a separate source");
+            assert_eq!(pages[&(a.as_raw() as usize)][1].used, 12, "two lists share append-only allocator storage");
+            assert_eq!(pages[&(b.as_raw() as usize)][0].used, 8);
+        }
+        gate.Signal(1).unwrap();
+        crate::gpu::texture::wait(&dev, &queue).unwrap();
+        readback_sparse_writes(queue.as_raw(), &[list.as_raw(), shared.as_ref().unwrap().as_raw()]);
+        let mut failures = Vec::new();
+        for (pass, rb) in readbacks.iter().enumerate() {
+            expected[8] = 0x1234_5678 ^ pass as u32; expected[11] = 0x8765_4321 ^ pass as u32;
+            rb.Map(0, None, Some(&mut ptr)).unwrap();
+            let got = std::slice::from_raw_parts(ptr as *const u32, WORDS);
+            let mismatches = got.iter().zip(&expected).filter(|(a,b)| a != b).count();
+            println!("BOTTOM-COPY enabled={enabled} pass={pass} markers={:08x?} adjacent={:08x?} mismatches={mismatches}", [got[8],got[11]], &got[14..16]);
+            if mismatches != 0 { failures.push((pass,mismatches)); }
+            rb.Unmap(0, None);
+        }
+        let cpu = std::slice::from_raw_parts(mem.0 as *const u32, WORDS);
+        let cpu_mismatches = cpu.iter().zip(&expected).filter(|(a,b)| a != b).count();
+        println!("BOTTOM-COPY enabled={enabled} CPU_shadow_mismatches={cpu_mismatches}");
+        // The normal wrapper is checked separately, without a CPU-blocked queue.
+        list.Reset(&b, None).unwrap();
+        write32_bottom_x(list.as_raw(), va + 32, 0xCAFE_BABE, 0, 0);
+        list.Close().unwrap();
+        queue.ExecuteCommandLists(&[Some(list.cast().unwrap())]);
+        crate::gpu::texture::wait(&dev, &queue).unwrap();
+        expected[8] = 0xCAFE_BABE;
+        let wrapped_mismatches = std::slice::from_raw_parts(mem.0 as *const u32, WORDS).iter().zip(&expected).filter(|(a,b)| a != b).count();
+        println!("BOTTOM-COPY enabled={enabled} wrapped_shadow_mismatches={wrapped_mismatches}");
+        for alloc in [&a,&b] { alloc.Reset().unwrap(); }
+        assert!(MARKER_PAGES.lock().unwrap().as_ref().is_none_or(|p| !p.contains_key(&(a.as_raw() as usize)) && !p.contains_key(&(b.as_raw() as usize))));
+        assert!(failures.is_empty() && cpu_mismatches == 0 && wrapped_mismatches == 0, "unpredicated markers, guards, source lifetime: {failures:?}, CPU={cpu_mismatches}");
     }
 }
