@@ -1331,11 +1331,37 @@ impl CompactCs {
     /// Whether the compute program `code` goes through the compact backend.
     pub fn takes(self, code: &[u8]) -> bool {
         match self {
-            CompactCs::Auto => compact::compact_wanted(code),
+            CompactCs::Auto => {
+                let programs = compact_programs();
+                compact::compact_wanted(code) || (!programs.is_empty() && programs.contains(&super::shader::fnv64(code)))
+            }
             CompactCs::Never => false,
             CompactCs::Always => true,
         }
     }
+}
+
+/// Additional raw program-code FNV64 hashes for Auto only; Never must still permit a classic retry.
+/// Unset selects none. A malformed list is rejected entirely, with one warning per process.
+fn compact_programs() -> &'static BTreeSet<u64> {
+    static PROGRAMS: std::sync::OnceLock<BTreeSet<u64>> = std::sync::OnceLock::new();
+    PROGRAMS.get_or_init(|| {
+        let Some(value) = std::env::var_os("XCL_COMPACT_CS_PROGRAMS") else { return BTreeSet::new() };
+        value.to_str().and_then(parse_compact_programs).unwrap_or_else(|| {
+            crate::xlog_warn!("[SHADER] XCL_COMPACT_CS_PROGRAMS must be comma-separated 16-digit hexadecimal program-code hashes (not container hashes); ignoring the entire list");
+            BTreeSet::new()
+        })
+    })
+}
+
+fn parse_compact_programs(value: &str) -> Option<BTreeSet<u64>> {
+    value.split(',').map(|entry| {
+        let entry = entry.trim();
+        if entry.len() != 16 || !entry.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        u64::from_str_radix(entry, 16).ok()
+    }).collect()
 }
 
 /// `translate`, but a compute program goes through the compact backend where `XCL_COMPACT_CS`
@@ -1500,6 +1526,51 @@ pub fn translate(code: &[u8], opt: &Options) -> Result<Translation, String> {
 #[cfg(test)]
 mod compact_cs_tests {
     use super::*;
+
+    #[test]
+    fn program_selection_parses_complete_hex_tokens_or_rejects_the_whole_list() {
+        let a = crate::gpu::shader::fnv64(b"synthetic program A");
+        let b = crate::gpu::shader::fnv64(b"synthetic program B");
+        assert_eq!(parse_compact_programs(&format!("{a:016x}, {b:016X}, {a:016x}")), Some(BTreeSet::from([a, b])));
+        assert_eq!(parse_compact_programs("0000000000000000"), Some(BTreeSet::from([0])));
+        for invalid in ["", " ", "1", "0x0123456789abcdef", "0123456789abcdef0", "0123456789abcdeg", ",", "0123456789abcdef,", ",0123456789abcdef", "01234567 9abcdef"] {
+            assert_eq!(parse_compact_programs(invalid), None, "accepted {invalid:?}");
+        }
+        assert_eq!(parse_compact_programs(&format!("{a:016x},invalid,{b:016x}")), None);
+    }
+
+    /// A separate process keeps the environment policy independent of concurrent tests.
+    #[test]
+    fn auto_program_selection_routes_only_compute_and_keeps_classic_retry() {
+        const TEST: &str = "gpu::recomp::compact_cs_tests::auto_program_selection_routes_only_compute_and_keeps_classic_retry";
+        let mut code = rdna2::encode("S_CBRANCH_SCC1", "ENC_SOPP", &[("SIMM16", 0)], None).unwrap();
+        code.extend(rdna2::encode("S_ENDPGM", "ENC_SOPP", &[], None).unwrap());
+        assert!(!compact::compact_wanted(&code), "small fixture must not enter auto normally");
+        if std::env::var_os("XCL_TEST_COMPACT_PROGRAM_SELECTION").is_some() {
+            assert!(CompactCs::Auto.takes(&code), "selected program stayed classic");
+            assert!(!CompactCs::Auto.takes(&[0; 8]), "unselected program changed");
+            assert!(!CompactCs::Never.takes(&code), "classic retry consulted the selection");
+            assert!(CompactCs::Always.takes(&code));
+            let opt = Options { mode: Mode::Compute(CsInterface::from_rsrc2([64, 1, 1], 0)), ..Default::default() };
+            let (selected, is_compact) = translate_as(&code, &opt, CompactCs::Auto).unwrap();
+            assert!(is_compact && selected.complete());
+            assert_eq!(selected.hlsl, translate_as(&code, &opt, CompactCs::Always).unwrap().0.hlsl);
+            let (retry, is_compact) = translate_as(&code, &opt, CompactCs::Never).unwrap();
+            assert!(!is_compact && retry.hlsl != selected.hlsl);
+            assert_eq!(retry.hlsl, translate(&code, &opt).unwrap().hlsl);
+            let opt = Options { mode: Mode::Kernel, ..Default::default() };
+            let (kernel, is_compact) = translate_as(&code, &opt, CompactCs::Auto).unwrap();
+            assert!(!is_compact);
+            assert_eq!(kernel.hlsl, translate(&code, &opt).unwrap().hlsl);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .env("XCL_TEST_COMPACT_PROGRAM_SELECTION", "1")
+            .env("XCL_COMPACT_CS_PROGRAMS", format!("{:016x}", crate::gpu::shader::fnv64(&code)))
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
 
     #[test]
     fn the_switch_reads_auto_0_and_1() {
