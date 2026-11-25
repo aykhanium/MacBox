@@ -746,6 +746,7 @@ struct Pipelines {
     /// biggest takes ~1.5 GB in the driver – fifteen at once took 24 GB
     running: (Mutex<usize>, std::sync::Condvar),
     most: usize,
+    trace: bool,
 }
 
 // D3D12 devices and root signatures are free-threaded
@@ -761,12 +762,13 @@ impl Pipelines {
             let (adapter, _) = crate::gpu::adapter::candidates(&factory, &sel).into_iter().next().ok_or_else(|| crate::gpu::adapter::no_match(&factory, &sel))?;
             let dev = crate::gpu::agility::create_device(&adapter, D3D_FEATURE_LEVEL_12_0).map_err(|e| e.to_string())?;
             let most = std::env::var("XCL_PIPELINE_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(4usize).max(1);
-            Ok(Pipelines { dev, signatures: Mutex::new(Default::default()), made: AtomicUsize::new(0), refused: AtomicUsize::new(0), running: (Mutex::new(0), std::sync::Condvar::new()), most })
+            let trace = std::env::var("XCL_PSO_TRACE").is_ok_and(|s| s.trim() == "1");
+            Ok(Pipelines { dev, signatures: Mutex::new(Default::default()), made: AtomicUsize::new(0), refused: AtomicUsize::new(0), running: (Mutex::new(0), std::sync::Condvar::new()), most, trace })
         }
     }
 
     /// The compute pipeline of `c` (made and released).
-    fn make(&self, c: &recomp::pso::Compiled) {
+    fn make(&self, c: &recomp::pso::Compiled, source: u64) {
         use windows::Win32::Graphics::Direct3D12::*;
         let key: Vec<u32> = c.samplers.iter().flat_map(|(w, cmp)| w.iter().copied().chain([*cmp as u32])).collect();
         let rs = {
@@ -797,7 +799,20 @@ impl Pipelines {
             }
             *n += 1;
         }
+        // CLI companion to the runtime trace: only admitted native calls get an ID.
+        let utc_ms = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+        let trace = self.trace.then(|| {
+            static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+            let job = SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!("xcl shaders: driver compile start #{job}: CS PSO, {} B DXIL, source CS={source:016x}, utc_ms={}", c.dxil.len(), utc_ms());
+            (job, std::time::Instant::now())
+        });
         let r: windows::core::Result<ID3D12PipelineState> = unsafe { self.dev.CreateComputePipelineState(&desc) };
+        if let Some((job, started)) = trace {
+            let elapsed = started.elapsed();
+            let hr = r.as_ref().err().map_or(0, |e| e.code().0 as u32);
+            eprintln!("xcl shaders: driver compile finish #{job}: CS PSO, {} B DXIL, source CS={source:016x}, utc_ms={}, {} ms in driver, HRESULT {hr:#010x}", c.dxil.len(), utc_ms(), elapsed.as_millis());
+        }
         *self.running.0.lock().unwrap() -= 1;
         self.running.1.notify_one();
         drop(std::mem::ManuallyDrop::into_inner(desc.pRootSignature));
@@ -862,7 +877,7 @@ fn precompile(input: &Input, limit: usize, windows: u32, split: Option<bool>, on
                     match recomp::pso::console_to_dxil_in(&blob, recomp::pso::Stage::Compute, 0, split, windows) {
                         Ok(c) => {
                             if let Some(p) = pipelines {
-                                p.make(&c);
+                                p.make(&c, if p.trace { shader::fnv64(&blob) } else { 0 });
                             }
                             compiled.fetch_add(1, Ordering::Relaxed)
                         }

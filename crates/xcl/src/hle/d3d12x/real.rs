@@ -3362,11 +3362,60 @@ unsafe fn has_non_pc_stage(d: *const D3D12_GRAPHICS_PIPELINE_STATE_DESC) -> bool
 
 type PsoFn = unsafe extern "system" fn(*mut c_void, *const c_void, *const GUID, *mut *mut c_void) -> HRESULT;
 
+// Opt-in diagnostics adapted from XCL (GPL-2.0-only), 2026-11-25:
+// https://github.com/xcl-dev/xcl/pull/1524 (4143a09e3478d665dc3027171f3383f356fb24b2)
+// https://github.com/xcl-dev/xcl/pull/1918 (79fde18030c29f70235f780f28ae0d64fc23cc46)
+// Only tracing: no upstream compile gates, driver cache or translation changes.
+struct NativePsoTrace {
+    kind: &'static str,
+    sources: String,
+    bytes: usize,
+    slot_wait: std::time::Duration,
+}
+
+impl NativePsoTrace {
+    fn new(kind: &'static str, bytes: usize, shaders: &[(&str, &[u8])]) -> Option<Self> {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        if !*ENABLED.get_or_init(|| std::env::var("XCL_PSO_TRACE").is_ok_and(|s| s.trim() == "1")) {
+            return None;
+        }
+        let sources = shaders.iter().filter(|(_, blob)| !blob.is_empty())
+            .map(|(stage, blob)| format!("{stage}={:016x}", crate::gpu::shader::fnv64(blob)))
+            .collect::<Vec<_>>().join(" ");
+        Some(Self { kind, sources, bytes, slot_wait: std::time::Duration::ZERO })
+    }
+}
+
+fn native_pso_call(trace: Option<&NativePsoTrace>, iid_retry: bool, build: impl FnOnce() -> HRESULT) -> HRESULT {
+    let Some(trace) = trace else { return build() };
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let job = SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+    let thread = std::thread::current();
+    let waited = if iid_retry { std::time::Duration::ZERO } else { trace.slot_wait };
+    crate::xlog_info!(
+        "D3D12.X: driver compile start #{job}: {} PSO, {} B DXIL, source {}, slot/commit wait {} ms, thread {}, IID retry {iid_retry}",
+        trace.kind, trace.bytes, trace.sources, waited.as_millis(), thread.name().unwrap_or("unnamed")
+    );
+    // Time the host call alone, excluding logging, slot/commit waits and object adoption.
+    let started = std::time::Instant::now();
+    let hr = build();
+    let took = started.elapsed();
+    crate::xlog_info!(
+        "D3D12.X: driver compile finish #{job}: {} PSO, {} B DXIL, source {}, {} ms in driver, HRESULT {hr:#x}",
+        trace.kind, trace.bytes, trace.sources, took.as_millis()
+    );
+    hr
+}
+
 unsafe fn finish_pso(this: *mut c_void, f: PsoFn, desc: *const c_void, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
-    let mut hr = f(this, desc, riid, ppv);
+    finish_pso_traced(this, f, desc, riid, ppv, None)
+}
+
+unsafe fn finish_pso_traced(this: *mut c_void, f: PsoFn, desc: *const c_void, riid: *const GUID, ppv: *mut *mut c_void, trace: Option<&NativePsoTrace>) -> HRESULT {
+    let mut hr = native_pso_call(trace, false, || f(this, desc, riid, ppv));
     if hr == E_NOINTERFACE {
         let iid = pc_iid(Kind::PipelineState);
-        hr = f(this, desc, &iid, ppv);
+        hr = native_pso_call(trace, true, || f(this, desc, &iid, ppv));
     }
     if hr >= 0 && !ppv.is_null() && !(*ppv).is_null() {
         adopt(*ppv, Kind::PipelineState);
@@ -3575,13 +3624,18 @@ unsafe fn translated_compute_pso(this: *mut c_void, f: PsoFn, desc: *const c_voi
     copy.pRootSignature = std::mem::transmute::<*mut c_void, std::mem::ManuallyDrop<Option<ID3D12RootSignature>>>(rs);
     copy.CS = bytecode(&dxil);
     copy.CachedPSO = D3D12_CACHED_PIPELINE_STATE::default();
+    let mut trace = NativePsoTrace::new("compute", dxil.len(), &[("CS", cs)]);
+    let wait_started = trace.as_ref().map(|_| std::time::Instant::now());
     // in the background, one at a time and within the commit left (each ~1.5 GB in the driver)
     let _slot = (big && std::thread::current().name().is_some_and(|n| n.starts_with("xcl-pso"))).then(|| {
         let slot = BIG_COMPILES.acquire();
         wait_for_commit();
         slot
     });
-    let hr = finish_pso(this, f, &copy as *const _ as *const c_void, riid, ppv);
+    if let (Some(trace), Some(started)) = (&mut trace, wait_started) {
+        trace.slot_wait = started.elapsed();
+    }
+    let hr = finish_pso_traced(this, f, &copy as *const _ as *const c_void, riid, ppv, trace.as_ref());
     if hr < 0 {
         note_translation_error(format!("the driver rejected the compute PSO with the translated CS ({hr:#x})"));
         return Some(Err(()));
@@ -3669,7 +3723,11 @@ unsafe fn translated_graphics_pso(this: *mut c_void, f: PsoFn, desc: *const c_vo
     if debug_pso_switch("XCL_DEBUG_NO_CULL", ps_hash) {
         copy.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     }
-    let hr = retry_without_rect_gs(&mut copy, rect_gs.is_some(), |c| finish_pso(this, f, c as *const _ as *const c_void, riid, ppv));
+    let hr = retry_without_rect_gs(&mut copy, rect_gs.is_some(), |c| {
+        let bytes = c.VS.BytecodeLength + c.PS.BytecodeLength + c.GS.BytecodeLength;
+        let trace = NativePsoTrace::new("graphics", bytes, &[("VS", vs), ("PS", shader_bytes(&d.PS).unwrap_or(&[])), ("GS", shader_bytes(&d.GS).unwrap_or(&[]))]);
+        finish_pso_traced(this, f, c as *const _ as *const c_void, riid, ppv, trace.as_ref())
+    });
     if hr < 0 {
         note_translation_error(format!(
             "the driver rejected the PSO with the translated shaders ({hr:#x}; topology type {}, {} render targets, DSV format {}, HS {}, GS {})",
@@ -4145,11 +4203,11 @@ fn two_pass_ps(ps: Option<&[u8]>, split_wave64: bool) -> Result<(Option<Vec<u8>>
 /// Create the mesh pipeline (`stream`, RS and shaders already in it) and the compute pass;
 /// the title gets the mesh pipeline state.
 #[allow(clippy::too_many_arguments)]
-unsafe fn finish_two_pass(this: *mut c_void, stream: &StreamOut, tp: crate::gpu::recomp::pso::TwoPass, mesh_rs: *mut c_void, kind: &'static str, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
+unsafe fn finish_two_pass(this: *mut c_void, stream: &StreamOut, tp: crate::gpu::recomp::pso::TwoPass, mesh_rs: *mut c_void, kind: &'static str, riid: *const GUID, ppv: *mut *mut c_void, mut trace: Option<NativePsoTrace>) -> HRESULT {
     let Some(rs) = abi_rs_for(this, &tp.samplers) else { return E_INVALIDARG };
     let fs: PsoFn = std::mem::transmute(orig_fn(this, slot_of(this, "CreatePipelineState")));
     let desc: [usize; 2] = [stream.0.len(), stream.0.as_ptr() as usize];
-    let hr = finish_pso(this, fs, desc.as_ptr() as *const c_void, riid, ppv);
+    let hr = finish_pso_traced(this, fs, desc.as_ptr() as *const c_void, riid, ppv, trace.as_ref());
     if hr < 0 {
         note_translation_error(format!("the driver rejected the mesh pipeline from the console {kind} ({hr:#x})"));
         return E_INVALIDARG;
@@ -4160,7 +4218,11 @@ unsafe fn finish_two_pass(this: *mut c_void, stream: &StreamOut, tp: crate::gpu:
     cdesc.CS = bytecode(&tp.cs);
     let iid = pc_iid(Kind::PipelineState);
     let mut compute: *mut c_void = std::ptr::null_mut();
-    let hc = fc(this, &cdesc as *const _ as *const c_void, &iid, &mut compute);
+    if let Some(trace) = &mut trace {
+        trace.kind = "two-pass compute";
+        trace.bytes = tp.cs.len();
+    }
+    let hc = native_pso_call(trace.as_ref(), false, || fc(this, &cdesc as *const _ as *const c_void, &iid, &mut compute));
     if hc < 0 || compute.is_null() {
         note_translation_error(format!("the driver rejected the compute pass of the console {kind} ({hc:#x})"));
         let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*(*(*ppv as *const *const usize)).add(2));
@@ -4215,6 +4277,7 @@ unsafe fn translated_mesh_stream(this: *mut c_void, desc: *const c_void, riid: *
         return Some(E_INVALIDARG);
     }
     let ps = subs.iter().find(|s| s.0 == D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS.0 as u32).and_then(|s| payload_shader(s.1));
+    let mut trace = NativePsoTrace::new("two-pass mesh", 0, &[("MS", ms), ("PS", ps.unwrap_or(&[]))]);
     let (tp, (ps, ps_samplers)) = match (console_mesh(ms, ps, wave32_only(this)), two_pass_ps(ps, graphics_wave32(this))) {
         (Ok(tp), Ok(ps)) => (tp, ps),
         (Err(e), _) => {
@@ -4251,7 +4314,10 @@ unsafe fn translated_mesh_stream(this: *mut c_void, desc: *const c_void, riid: *
             out.raw(*ty, payload, palign == 8);
         }
     }
-    Some(finish_two_pass(this, &out, tp, rs, "MS", riid, ppv))
+    if let Some(trace) = &mut trace {
+        trace.bytes = tp.ms.len() + ps.as_ref().map_or(0, Vec::len);
+    }
+    Some(finish_two_pass(this, &out, tp, rs, "MS", riid, ppv, trace))
 }
 
 /// A graphics PSO with a console VS + GS: the GS pipeline in two passes, as a mesh pipeline
@@ -4322,7 +4388,8 @@ unsafe fn translated_gs_pso(this: *mut c_void, d: &D3D12_GRAPHICS_PIPELINE_STATE
     if d.Flags.0 != 0 {
         out.put(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_FLAGS, &d.Flags);
     }
-    finish_two_pass(this, &out, tp, rs, "GS", riid, ppv)
+    let trace = NativePsoTrace::new("two-pass mesh", tp.ms.len() + ps.as_ref().map_or(0, Vec::len), &[("VS", vs), ("GS", gs), ("PS", shader_bytes(&d.PS).unwrap_or(&[]))]);
+    finish_two_pass(this, &out, tp, rs, "GS", riid, ppv, trace)
 }
 
 /// Rewrite a pipeline state stream with stand-in shaders. None if not possible.
@@ -5128,6 +5195,37 @@ pub fn stop_if_device_removed() {
         crate::log::flush();
         unsafe {
             windows_sys::Win32::System::Threading::TerminateProcess(windows_sys::Win32::System::Threading::GetCurrentProcess(), e.code().0 as u32);
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_pso_trace_tests {
+    use super::*;
+
+    #[test]
+    fn native_pso_trace_preserves_host_results_and_iid_retry() {
+        struct Host { first: HRESULT, calls: usize, initial_iid: *const GUID, iids_match: bool }
+        unsafe extern "system" fn create(_: *mut c_void, desc: *const c_void, iid: *const GUID, _: *mut *mut c_void) -> HRESULT {
+            let host = &mut *(desc as *mut Host);
+            host.calls += 1;
+            if host.calls == 1 {
+                host.iids_match &= iid == host.initial_iid;
+                host.first
+            } else {
+                let pc = pc_iid(Kind::PipelineState);
+                host.iids_match &= ((*iid).data1, (*iid).data2, (*iid).data3, (*iid).data4) == (pc.data1, pc.data2, pc.data3, pc.data4);
+                S_OK
+            }
+        }
+        let trace = NativePsoTrace { kind: "test", sources: "CS=0000000000000000".into(), bytes: 0, slot_wait: std::time::Duration::ZERO };
+        let iid: GUID = unsafe { std::mem::zeroed() };
+        for trace in [None, Some(&trace)] {
+            for (first, expected, calls) in [(S_OK, S_OK, 1), (E_INVALIDARG, E_INVALIDARG, 1), (E_NOINTERFACE, S_OK, 2)] {
+                let mut host = Host { first, calls: 0, initial_iid: &iid, iids_match: true };
+                let hr = unsafe { finish_pso_traced(std::ptr::null_mut(), create, &mut host as *mut _ as *const c_void, &iid, std::ptr::null_mut(), trace) };
+                assert_eq!((hr, host.calls, host.iids_match), (expected, calls, true));
+            }
         }
     }
 }
