@@ -4,6 +4,8 @@
 //! root UAVs u0 `io` (initial SGPRs = user data), u1 `res`, u2 `mem` (flat memory), plus the
 //! directly indexed descriptor heaps (images / samplers). Mapping the title's root arguments
 //! onto that ABI at draw time is the next step (needs the console runtime's user-data layout).
+//! Compact routing/cache isolation adapted from XCL (GPL-2.0-only), PR #1316:
+//! https://github.com/xcl-dev/xcl/pull/1316, 964f5ed9be2eff8d18e4ed5073f0a826c9ed6015 (2026-11-25).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -13,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
 
-use super::{dxc, interface, translate, Mode, Options};
+use super::{dxc, interface, translate_as, CompactCs, Mode, Options};
 use crate::gpu::xbox;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,7 +119,7 @@ pub fn console_to_dxil_in(blob: &[u8], stage: Stage, sampler_base: u32, split_wa
 /// in `ShaderCache`.
 pub fn console_to_dxil_shared(blob: &[u8], stage: Stage, sampler_base: u32, split_wave64: bool, windows: u32) -> Result<Arc<Compiled>, String> {
     if !cache_allowed(stage, |name| std::env::var_os(name).is_some()) {
-        return compile_console_shader(blob, stage, sampler_base, windows, split_wave64).map(Arc::new);
+        return normal_after_refusal(compile_console_shader(blob, stage, sampler_base, windows, split_wave64, CompactCs::get()), || compile_console_shader(blob, stage, sampler_base, windows, split_wave64, CompactCs::Never)).map(Arc::new);
     }
     static CACHE: OnceLock<Mutex<ShaderCache>> = OnceLock::new();
     static TRANSLATED: OnceLock<Mutex<HashMap<TranslatedKey, Arc<Translated>>>> = OnceLock::new();
@@ -131,11 +133,19 @@ pub fn console_to_dxil_shared(blob: &[u8], stage: Stage, sampler_base: u32, spli
         split_wave64,
         cache_dir: dxc::cache_dir(),
     };
-    let known = TranslatedKey { hash: key.hash, len: blob.len(), stage, sampler_base, windows, split_wave64 };
     let dir = key.cache_dir.clone();
-    // without the debug switches (`cache_allowed`) this is `compile_console_shader`
-    let compile_one = || translated_dxil(translated, known, &dir, || console_translation(blob, stage, sampler_base, windows, split_wave64).map(|(t, profile)| (t.hlsl, profile, t.static_samplers)));
-    let from_disk = || translated::cached(&dir, blob, stage, sampler_base, windows, split_wave64, compile_one);
+    let shader_hash = key.hash;
+    let disk = |form| {
+        let compact = stage == Stage::Compute && compact_form(blob, form);
+        let known = TranslatedKey { hash: shader_hash, len: blob.len(), stage, sampler_base, windows, split_wave64, compact };
+        // Both the HLSL-key memo and the disk entry separate compact from a classic retry.
+        let compile_one = || translated_dxil(translated, known, &dir, || {
+            console_translation(blob, stage, sampler_base, windows, split_wave64, form)
+                .map(|(t, profile, compact)| (t.hlsl, profile, t.static_samplers, compact))
+        });
+        translated::cached(&dir, blob, stage, sampler_base, windows, split_wave64, compact, compile_one)
+    };
+    let from_disk = || normal_after_refusal(disk(CompactCs::get()), || disk(CompactCs::Never));
     cached_shader(cache, key, blob, from_disk)
 }
 
@@ -176,8 +186,8 @@ mod translated {
         b.iter().fold(0x9E37_79B9_7F4A_7C15u64, |h, &x| (h ^ x as u64).wrapping_mul(0xFF51_AFD7_ED55_8CCD).rotate_left(29))
     }
 
-    fn file(dir: &Path, blob: &[u8], stage: Stage, sampler_base: u32, windows: u32, split: bool) -> PathBuf {
-        dir.join("translated").join(format!("{:016x}_{stage:?}_{sampler_base}_{windows}_{}.bin", crate::gpu::shader::fnv64(blob), split as u8))
+    pub(super) fn file(dir: &Path, blob: &[u8], stage: Stage, sampler_base: u32, windows: u32, split: bool, compact: bool) -> PathBuf {
+        dir.join("translated").join(format!("{:016x}_{stage:?}_{sampler_base}_{windows}_{}{}.bin", crate::gpu::shader::fnv64(blob), split as u8, if compact { "_c" } else { "" }))
     }
 
     fn header(ident: u64, blob: &[u8]) -> Vec<u8> {
@@ -234,13 +244,21 @@ mod translated {
         sampler_base: u32,
         windows: u32,
         split: bool,
+        compact: bool,
         translate: impl FnOnce() -> Result<Compiled, String>,
     ) -> Result<Compiled, String> {
-        let ident = identity();
+        cached_in(dir, identity(), blob, stage, sampler_base, windows, split, compact, translate)
+    }
+
+    pub(super) fn cached_in(
+        dir: &Path, ident: u64, blob: &[u8], stage: Stage, sampler_base: u32,
+        windows: u32, split: bool, compact: bool,
+        translate: impl FnOnce() -> Result<Compiled, String>,
+    ) -> Result<Compiled, String> {
         if ident == 0 {
             return translate();
         }
-        let path = file(dir, blob, stage, sampler_base, windows, split);
+        let path = file(dir, blob, stage, sampler_base, windows, split, compact);
         if let Some(c) = load_in(&path, ident, blob) {
             super::dxc::note_memory_hit();
             return Ok(c);
@@ -260,6 +278,8 @@ mod translated {
 struct Translated {
     dxil_key: u64,
     samplers: Vec<StaticSampler>,
+    /// The returned translation used compact (the requested form may have fallen back).
+    compact: bool,
 }
 
 /// What a translation depends on. No copy of the blob to compare with: its length instead.
@@ -271,6 +291,8 @@ struct TranslatedKey {
     sampler_base: u32,
     windows: u32,
     split_wave64: bool,
+    /// Requested form: a DXC refusal retries classic under a different key.
+    compact: bool,
 }
 
 /// DXIL of a console shader through `known`: a shader translated before comes from the disk
@@ -280,7 +302,7 @@ fn translated_dxil(
     known: &Mutex<HashMap<TranslatedKey, Arc<Translated>>>,
     key: TranslatedKey,
     dir: &Path,
-    translate: impl FnOnce() -> Result<(String, &'static str, Vec<StaticSampler>), String>,
+    translate: impl FnOnce() -> Result<(String, &'static str, Vec<StaticSampler>, bool), String>,
 ) -> Result<Compiled, String> {
     let before = known.lock().unwrap().get(&key).cloned();
     if let Some(t) = &before {
@@ -289,25 +311,25 @@ fn translated_dxil(
         if n == 1 || n % 1000 == 0 {
             crate::xlog_info!("[SHADER] translation of a console shader seen before skipped (#{n})");
         }
-        if let Some(dxil) = dxc::cached_by_key_in(dir, t.dxil_key)? {
+        if let Some(dxil) = dxc::cached_by_key_in(dir, t.dxil_key).map_err(|e| compact_dxc_error(t.compact, e))? {
             return Ok(Compiled { dxil, samplers: t.samplers.clone() });
         }
     }
-    let (hlsl, profile, samplers) = translate()?;
+    let (hlsl, profile, samplers, compact) = translate()?;
     let dxil_key = match before {
         Some(t) => t.dxil_key,
         None => {
             let dxil_key = dxc::cache_key(&hlsl, "main", profile);
-            known.lock().unwrap().insert(key, Arc::new(Translated { dxil_key, samplers: samplers.clone() }));
+            known.lock().unwrap().insert(key, Arc::new(Translated { dxil_key, samplers: samplers.clone(), compact }));
             dxil_key
         }
     };
-    let dxil = dxc::compile_cached_in_keyed(dir, dxil_key, &hlsl, "main", profile)?.0;
+    let dxil = dxc::compile_cached_in_keyed(dir, dxil_key, &hlsl, "main", profile).map_err(|e| compact_dxc_error(compact, e))?.0;
     Ok(Compiled { dxil, samplers })
 }
 
-fn compile_console_shader(blob: &[u8], stage: Stage, sampler_base: u32, windows: u32, split_wave64: bool) -> Result<Compiled, String> {
-    let (mut t, profile) = console_translation(blob, stage, sampler_base, windows, split_wave64)?;
+fn compile_console_shader(blob: &[u8], stage: Stage, sampler_base: u32, windows: u32, split_wave64: bool, form: CompactCs) -> Result<Compiled, String> {
+    let (mut t, profile, compact) = console_translation(blob, stage, sampler_base, windows, split_wave64, form)?;
     if let Some([r, g, b]) = (stage == Stage::Pixel).then(|| debug_color(blob)).flatten() {
         t.hlsl = t.hlsl.replacen("    return xo;\n}", &format!("    xo.t0 = float4({r:.3}, {g:.3}, {b:.3}, 1.0);\n    return xo;\n}}"), 1);
     }
@@ -337,8 +359,24 @@ fn compile_console_shader(blob: &[u8], stage: Stage, sampler_base: u32, windows:
     }) {
         t.hlsl = t.hlsl.replacen("    if (!xcl_live) discard;\n    return xo;\n}", &format!("    xo.t0 = {expr};\n    return xo;\n}}"), 1);
     }
-    let dxil = dxc::compile_cached(&t.hlsl, "main", profile)?.0;
+    let dxil = dxc::compile_cached(&t.hlsl, "main", profile).map_err(|e| compact_dxc_error(compact, e))?.0;
     Ok(Compiled { dxil, samplers: t.static_samplers })
+}
+
+const COMPACT_REFUSED: &str = "DXC refused the compact form: ";
+
+fn compact_dxc_error(compact: bool, error: String) -> String {
+    if compact && !dxc::in_cached_only() { format!("{COMPACT_REFUSED}{error}") } else { error }
+}
+
+fn normal_after_refusal(first: Result<Compiled, String>, normal: impl FnOnce() -> Result<Compiled, String>) -> Result<Compiled, String> {
+    match first {
+        Err(e) if e.starts_with(COMPACT_REFUSED) => {
+            crate::xlog_warn!("[SHADER] {e} – retrying the normal form");
+            normal()
+        }
+        r => r,
+    }
 }
 
 /// Every `X_T.Sample(args)` of generated HLSL as `X_T.SampleLevel(args, 0.0f)`.
@@ -396,7 +434,7 @@ fn debug_color(blob: &[u8]) -> Option<[f32; 3]> {
 
 /// The HLSL (and its DXC profile) `console_to_dxil` compiles.
 pub fn console_to_hlsl(blob: &[u8], stage: Stage) -> Result<(String, &'static str), String> {
-    console_translation(blob, stage, 0, mem_windows(), false).map(|(t, p)| (t.hlsl, p))
+    console_translation(blob, stage, 0, mem_windows(), false, CompactCs::get()).map(|(t, p, _)| (t.hlsl, p))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -523,18 +561,32 @@ pub fn compute_user_sgprs(blob: &[u8]) -> Option<u32> {
     }
 }
 
-fn console_translation(blob: &[u8], stage: Stage, sampler_base: u32, windows: u32, split_wave64: bool) -> Result<(super::Translation, &'static str), String> {
+fn compact_form(blob: &[u8], form: CompactCs) -> bool {
+    match form {
+        CompactCs::Never => return false,
+        CompactCs::Always => return true,
+        CompactCs::Auto => {}
+    }
+    if let Some(f) = fspx(blob) {
+        return form.takes(f.code);
+    }
+    let Some(sh) = xbox::parse(blob) else { return false };
+    let Some(f) = sh.fssm.iter().find(|f| f.stages.first().is_some_and(|s| s.hw == 6)) else { return false };
+    f.programs.first().and_then(|p| f.data.get(p.offset..p.offset + p.len)).is_some_and(|code| form.takes(code))
+}
+
+fn console_translation(blob: &[u8], stage: Stage, sampler_base: u32, windows: u32, split_wave64: bool, form: CompactCs) -> Result<(super::Translation, &'static str, bool), String> {
     if let Some(f) = fspx(blob) {
         if stage != Stage::Compute {
             return Err("an FSPX (driver) container in a graphics slot".into());
         }
         let cs = super::CsInterface::from_rsrc2(f.threads, f.rsrc2);
-        let t = translate(f.code, &Options { mode: Mode::Compute(cs), wave64: super::detect_wave64(f.code), split_wave64, static_sampler_base: sampler_base, mem_windows: windows, ..Default::default() })?;
+        let (t, compact) = translate_as(f.code, &Options { mode: Mode::Compute(cs), wave64: super::detect_wave64(f.code), split_wave64, static_sampler_base: sampler_base, mem_windows: windows, ..Default::default() }, form)?;
         if !t.complete() {
             let missing: Vec<&String> = t.unsupported.keys().collect();
             return Err(format!("incomplete translation, missing: {missing:?}"));
         }
-        return Ok((t, "cs_6_6"));
+        return Ok((t, "cs_6_6", compact));
     }
     let sh = xbox::parse(blob).ok_or("not a console shader container")?;
     // the hardware variant for this pipeline slot: VS (not the ES variant used with GS), PS
@@ -557,12 +609,12 @@ fn console_translation(blob: &[u8], stage: Stage, sampler_base: u32, windows: u3
     };
     let p = f.programs.first().ok_or("FSSM without a program")?;
     let code = &f.data[p.offset..p.offset + p.len];
-    let t = translate(code, &Options { mode, wave64: super::detect_wave64(code), split_wave64, static_sampler_base: sampler_base, mem_windows: windows, ..Default::default() })?;
+    let (t, compact) = translate_as(code, &Options { mode, wave64: super::detect_wave64(code), split_wave64, static_sampler_base: sampler_base, mem_windows: windows, ..Default::default() }, form)?;
     if !t.complete() {
         let missing: Vec<&String> = t.unsupported.keys().collect();
         return Err(format!("incomplete translation, missing: {missing:?}"));
     }
-    Ok((t, profile))
+    Ok((t, profile, compact))
 }
 
 /// A console geometry stage as XCL runs it, in two passes: the console program as a compute
@@ -863,9 +915,9 @@ mod shader_cache_tests {
         let dir = std::env::temp_dir().join(format!("xcl-known-translation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let known = Mutex::new(HashMap::new());
-        let key = TranslatedKey { hash: 1, len: 100, stage: Stage::Pixel, sampler_base: 2, windows: 1, split_wave64: false };
+        let key = TranslatedKey { hash: 1, len: 100, stage: Stage::Pixel, sampler_base: 2, windows: 1, split_wave64: false, compact: false };
         let samplers: Vec<StaticSampler> = vec![([1, 2, 3, 4], true)];
-        let translate = || Ok(("known translation".to_string(), "ps_6_6", vec![([1, 2, 3, 4], true)]));
+        let translate = || Ok(("known translation".to_string(), "ps_6_6", vec![([1, 2, 3, 4], true)], false));
         // first sight, DXIL not compiled: translated to learn the key, a miss for the probe
         let (r, missed) = dxc::cached_only(|| translated_dxil(&known, key, &dir, translate));
         assert!(r.is_err() && missed);
@@ -886,21 +938,75 @@ mod shader_cache_tests {
             assert_eq!((c.dxil, c.samplers), (dxil.clone(), samplers.clone()));
         }
         // another shader, the same shader for another slot: their own translations
-        for other in [TranslatedKey { hash: 2, ..key }, TranslatedKey { len: 101, ..key }, TranslatedKey { stage: Stage::Vertex, ..key }, TranslatedKey { sampler_base: 0, ..key }, TranslatedKey { windows: 2, ..key }, TranslatedKey { split_wave64: true, ..key }] {
+        for other in [TranslatedKey { hash: 2, ..key }, TranslatedKey { len: 101, ..key }, TranslatedKey { stage: Stage::Vertex, ..key }, TranslatedKey { sampler_base: 0, ..key }, TranslatedKey { windows: 2, ..key }, TranslatedKey { split_wave64: true, ..key }, TranslatedKey { compact: true, ..key }] {
             let mut calls = 0;
             let (r, missed) = dxc::cached_only(|| {
                 translated_dxil(&known, other, &dir, || {
                     calls += 1;
-                    Ok((format!("other translation {}", known.lock().unwrap().len()), "ps_6_6", Vec::new()))
+                    Ok((format!("other translation {}", known.lock().unwrap().len()), "ps_6_6", Vec::new(), false))
                 })
             });
             assert!(r.is_err() && missed && calls == 1);
         }
-        assert_eq!(known.lock().unwrap().len(), 7);
+        assert_eq!(known.lock().unwrap().len(), 8);
         // a failed translation is not remembered
         let failed = TranslatedKey { hash: 3, ..key };
         assert!(translated_dxil(&known, failed, &dir, || Err("incomplete translation".into())).is_err());
         assert!(!known.lock().unwrap().contains_key(&failed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compact_and_classic_disk_entries_and_refusal_are_isolated() {
+        let dir = std::env::temp_dir().join(format!("xcl-compact-disk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let blob = b"console";
+        let normal = translated::file(&dir, blob, Stage::Compute, 0, 4, true, false);
+        let compact = translated::file(&dir, blob, Stage::Compute, 0, 4, true, true);
+        assert_ne!(normal, compact);
+        assert!(compact.to_string_lossy().ends_with("_c.bin"));
+        let disk = |is_compact, result| translated::cached_in(&dir, 42, blob, Stage::Compute, 0, 4, true, is_compact, || result);
+        let c = normal_after_refusal(disk(true, Err(compact_dxc_error(true, "synthetic DXC refusal".into()))), || disk(false, Ok(compiled(2)))).unwrap();
+        assert_eq!(c.dxil, compiled(2).dxil);
+        assert!(normal.exists() && !compact.exists());
+        disk(true, Ok(compiled(1))).unwrap();
+        for (form, want) in [(false, 2), (true, 1)] {
+            let got = translated::cached_in(&dir, 42, blob, Stage::Compute, 0, 4, true, form, || panic!("lost cached form")).unwrap();
+            assert_eq!(got.dxil, compiled(want).dxil);
+        }
+        let (r, _) = dxc::cached_only(|| normal_after_refusal(Err(compact_dxc_error(true, "not compiled".into())), || panic!("cached-only probe retried")));
+        assert_eq!(r.err().unwrap(), "not compiled");
+        assert_eq!(normal_after_refusal(Err("classic failure".into()), || panic!("classic error retried")).err().unwrap(), "classic failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compact_and_classic_hlsl_keys_remain_separate_for_a_retry() {
+        let dir = std::env::temp_dir().join(format!("xcl-compact-known-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let known = Mutex::new(HashMap::new());
+        let key = TranslatedKey { hash: 1, len: 100, stage: Stage::Compute, sampler_base: 0, windows: 4, split_wave64: true, compact: true };
+        let classic = TranslatedKey { compact: false, ..key };
+        for (form, source) in [(key, "compact source"), (classic, "classic source")] {
+            let (r, missed) = dxc::cached_only(|| translated_dxil(&known, form, &dir, || Ok((source.into(), "cs_6_6", Vec::new(), form.compact))));
+            assert!(r.is_err() && missed);
+            assert!(!r.err().unwrap().starts_with(COMPACT_REFUSED), "a cache miss is not a refusal");
+        }
+        let (compact_key, classic_key) = {
+            let k = known.lock().unwrap();
+            assert!(k[&key].compact && !k[&classic].compact);
+            (k[&key].dxil_key, k[&classic].dxil_key)
+        };
+        assert_ne!(compact_key, classic_key);
+        let compact_dxil = dxc::cache_tests::synthetic_dxil(1);
+        let classic_dxil = dxc::cache_tests::synthetic_dxil(2);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{compact_key:016x}.dxil")), &compact_dxil).unwrap();
+        std::fs::write(dir.join(format!("{classic_key:016x}.dxil")), &classic_dxil).unwrap();
+        let got = normal_after_refusal(Err(compact_dxc_error(true, "synthetic DXC refusal".into())), || translated_dxil(&known, classic, &dir, || panic!("classic form translated again"))).unwrap();
+        assert_eq!(got.dxil, classic_dxil, "retry reused the compact HLSL key");
+        let compact = translated_dxil(&known, key, &dir, || panic!("compact form translated again")).unwrap();
+        assert_eq!(compact.dxil, compact_dxil);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
