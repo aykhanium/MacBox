@@ -6,6 +6,9 @@
 //! as it is there. A graphics pipeline draws nothing until then; a compute pipeline is waited
 //! for at its first bind (a skipped dispatch would corrupt what it computes).
 //! `XCL_ASYNC_PSO=0` builds every pipeline in the call, as before.
+//!
+//! Bind-wait tracking and regression adapted 2026-11-25 from XCL (GPL-2.0-only), PR #1288:
+//! https://github.com/xcl-dev/xcl/pull/1288 (9cdae10f0bdf21b64a80958a87498b8f8124ac1d).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -52,6 +55,29 @@ fn complete(p: &Pending, real: usize) {
 }
 static BUILT: AtomicUsize = AtomicUsize::new(0);
 static FAILED: AtomicUsize = AtomicUsize::new(0);
+
+/// Binds waiting right now for a pipeline still being built (`title_held`).
+static HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// A title thread is held where a console title never waits. `kernelx::Sleep` excludes it.
+pub fn title_held() -> bool {
+    HELD.load(Ordering::Acquire) != 0
+}
+
+struct Held;
+
+impl Held {
+    fn new() -> Held {
+        HELD.fetch_add(1, Ordering::AcqRel);
+        Held
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        HELD.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 pub fn enabled() -> bool {
     std::env::var("XCL_ASYNC_PSO").map_or(true, |v| v != "0")
@@ -153,6 +179,7 @@ pub fn resolve(pso: usize) -> usize {
 /// it yet (a queue of a title's hundreds of pipelines must not hold up the one it binds now).
 pub fn resolve_wait(pso: usize) -> usize {
     let Some(p) = entry(pso) else { return pso };
+    let _held = (!*p.done.lock().unwrap()).then(Held::new);
     let job = p.job.lock().unwrap().take();
     if let Some(job) = job {
         complete(&p, job());
@@ -200,4 +227,54 @@ pub fn is_pending(pso: usize) -> bool {
 pub fn counts() -> (usize, usize, usize) {
     let pending = PENDING.lock().unwrap().as_ref().map_or(0, |m| m.values().filter(|p| !*p.done.lock().unwrap()).count());
     (BUILT.load(Ordering::Relaxed), FAILED.load(Ordering::Relaxed), pending)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bind_waiting_for_a_build_holds_the_title() {
+        // The hold count is process-wide. Run alone so other GPU tests cannot hold it.
+        const CHILD: &str = "XCL_TEST_BIND_HOLD_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "hle::d3d12x::pso_async::tests::a_bind_waiting_for_a_build_holds_the_title", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        assert!(!title_held());
+        let mut binds = Vec::new();
+        for i in 0..2 {
+            let standin = 0x7E57_B002usize + i;
+            let (started, building) = mpsc::channel();
+            let (go, finish) = mpsc::channel::<()>();
+            submit_lazy(standin, true, Box::new(move || {
+                let _ = started.send(());
+                let _ = finish.recv();
+                0x5252 + i
+            }));
+            let bind = std::thread::spawn(move || resolve_wait(standin));
+            building.recv_timeout(std::time::Duration::from_secs(10)).expect("the pipeline is being built");
+            binds.push((standin, go, bind));
+        }
+        let both_held = title_held();
+        let (standin, go, bind) = binds.remove(0);
+        go.send(()).unwrap();
+        assert_eq!(bind.join().unwrap(), 0x5252);
+        let one_held = title_held();
+        assert_eq!(released(standin), 0x5252);
+        let (standin, go, bind) = binds.remove(0);
+        go.send(()).unwrap();
+        assert_eq!(bind.join().unwrap(), 0x5253);
+        let cleared = !title_held();
+        // A completed pipeline does not leave a hold behind on later binds either.
+        assert_eq!(resolve_wait(standin), 0x5253);
+        assert!(!title_held(), "a completed pipeline left the title held");
+        assert_eq!(released(standin), 0x5253);
+        assert!(both_held, "binds wait for builds, but the title is not held");
+        assert!(one_held, "the first completion cleared another bind's hold");
+        assert!(cleared, "the hold count did not clear after all builds completed");
+    }
 }
