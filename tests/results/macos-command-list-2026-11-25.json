@@ -1,0 +1,243 @@
+{
+  "project": "MacBox",
+  "date": "2026-11-25",
+  "base_commit": "6952f6d9c7c70272f7cac28ed8e11d0c0b679c3c",
+  "state": "Validation performed on the working-tree command-list IID translation fix and regression tests before commit; no PR created.",
+  "hardware": "Apple M5 Max, 64 GB, macOS 27.2 (26B123), CrossOver 26.3, D3DMetal",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "target": "x86_64-pc-windows-gnullvm",
+  "profile": "release",
+  "validator": "Codex (GPT-6)",
+  "runs": [
+    {
+      "name": "before_fix",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "command_list_creation",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 101,
+      "elapsed_seconds": 30.92,
+      "counts": {
+        "passed": 0,
+        "failed": 3,
+        "ignored": 0
+      },
+      "runtime_skips": []
+    },
+    {
+      "name": "after_fix_default",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "--",
+        "hle::d3d12x::device_x::tests::",
+        "hle::d3d12x::title_list::tests::",
+        "dma_list_release_cleans_up_list_state",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 6.5,
+      "counts": {
+        "passed": 11,
+        "failed": 0,
+        "ignored": 0
+      },
+      "runtime_skips": []
+    },
+    {
+      "name": "recorder_fixture_before_initialization",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "command_list_creation",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all",
+        "XCL_CONSOLE_LISTS": "1"
+      },
+      "exit_code": 101,
+      "elapsed_seconds": 6.73,
+      "counts": {
+        "passed": 2,
+        "failed": 1,
+        "ignored": 0
+      },
+      "runtime_skips": []
+    },
+    {
+      "name": "after_fix_console_mode",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "command_list_creation",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all",
+        "XCL_CONSOLE_LISTS": "1"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 30.8,
+      "counts": {
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      "runtime_skips": []
+    }
+  ],
+  "fixture_note": "The initial optional-recorder test failed at Close because the test created a device without initializing runtime UMA. Its fixture now calls real::init in recorder mode; the same Close assertion passes. Production code was unchanged by this fixture correction.",
+  "build": "scripts/macos.sh test rebuilt the Windows release workspace successfully before each test command.",
+  "source_sha256": {
+    "crates/xcl/src/hle/d3d12x/device_x.rs": "d76d1bb855c73c30405aff11441f2ef9feac09d3c4c045523a356f4d56ec918f",
+    "crates/xcl/src/hle/d3d12x/title_list.rs": "8586bd2c70f52632676f619062efb5c9d242ebc893a1ce25aa99603d0d10d959"
+  },
+  "not_tested": [
+    "Native macOS ARM64 runtime: not built / not tested.",
+    "Native Windows/MSVC test suite and GPU validation.",
+    "Full workspace suite not rerun; existing failures remain documented in the 2026-11-24 report.",
+    "Long sessions, playable visuals, gameplay and audio.",
+    "Upstream smoke.ps1 comparison on clean committed heads; these local runs are not PR smoke certification."
+  ],
+  "local_title_comparison": [
+    {
+      "name": "before_fix",
+      "command": [
+        "./scripts/macos.sh",
+        "run",
+        "<local game directory, Wine path>"
+      ],
+      "path_note": "Private path arguments are redacted; raw commands and logs retained locally outside the repository.",
+      "environment": {
+        "WINEDEBUG": "-all",
+        "XCL_NETWORK": "0",
+        "XCL_DATA_ROOT": "<isolated data directory, Wine path>",
+        "XCL_RUN_SECONDS": "30",
+        "XCL_ACTIVITY": "1",
+        "XCL_BACKGROUND": "1",
+        "XCL_DXC_THREADS": "2",
+        "XCL_ASYNC_PSO": "1",
+        "XCL_FRAME_DUMP": "120",
+        "XCL_D3D12_TRACE": "all"
+      },
+      "requested_seconds": 30,
+      "wall_seconds": 6.11,
+      "windows_exit_code": "0xc0000005",
+      "crashed": true,
+      "present_x_calls": 0,
+      "unique_shader_hashes": 0,
+      "translation_error_entries": 0,
+      "called_stub_entries": 0
+    },
+    {
+      "name": "after_fix_initial",
+      "command": [
+        "./scripts/macos.sh",
+        "run",
+        "<local game directory, Wine path>"
+      ],
+      "path_note": "Private path arguments are redacted; raw commands and logs retained locally outside the repository.",
+      "environment": {
+        "WINEDEBUG": "-all",
+        "XCL_NETWORK": "0",
+        "XCL_DATA_ROOT": "<isolated data directory, Wine path>",
+        "XCL_RUN_SECONDS": "30",
+        "XCL_ACTIVITY": "1",
+        "XCL_BACKGROUND": "1",
+        "XCL_DXC_THREADS": "2",
+        "XCL_ASYNC_PSO": "1",
+        "XCL_FRAME_DUMP": "120",
+        "XCL_D3D12_TRACE": "all"
+      },
+      "requested_seconds": 30,
+      "wall_seconds": 32.74,
+      "windows_exit_code": "0x0",
+      "crashed": false,
+      "present_x_calls": 354,
+      "unique_shader_hashes": 5367,
+      "translation_error_entries": 40,
+      "called_stub_entries": 6,
+      "runtime_sha256": "f8ac65a72ce3c6c8ec473d202dc07e5b729bf8bd37aab7a0df33d6e93a43b2d7",
+      "termination": "XCL_RUN_SECONDS timer; not game completion",
+      "last_frame_dump": {
+        "frame": 260,
+        "width": 3840,
+        "height": 2160,
+        "format": 28,
+        "sample_step": 4,
+        "sampled_pixels": 518400,
+        "non_dark_samples": 0
+      }
+    },
+    {
+      "name": "after_fix_final_build",
+      "command": [
+        "./scripts/macos.sh",
+        "run",
+        "<local game directory, Wine path>"
+      ],
+      "path_note": "Private path arguments are redacted; raw commands and logs retained locally outside the repository.",
+      "environment": {
+        "WINEDEBUG": "-all",
+        "XCL_NETWORK": "0",
+        "XCL_DATA_ROOT": "<isolated data directory, Wine path>",
+        "XCL_RUN_SECONDS": "30",
+        "XCL_ACTIVITY": "1",
+        "XCL_BACKGROUND": "1",
+        "XCL_DXC_THREADS": "2",
+        "XCL_ASYNC_PSO": "1",
+        "XCL_FRAME_DUMP": "120",
+        "XCL_D3D12_TRACE": "all"
+      },
+      "requested_seconds": 30,
+      "wall_seconds": 32.83,
+      "windows_exit_code": "0x0",
+      "crashed": false,
+      "present_x_calls": 377,
+      "unique_shader_hashes": 4354,
+      "translation_error_entries": 36,
+      "called_stub_entries": 6,
+      "runtime_sha256": "02fdfc0ef8fe8deb23690b91c23b29f738c70be7f14bc2fa48b8ab42ac395d12",
+      "termination": "XCL_RUN_SECONDS timer; not game completion",
+      "last_frame_dump": {
+        "frame": 260,
+        "width": 3840,
+        "height": 2160,
+        "format": 28,
+        "sample_step": 4,
+        "sampled_pixels": 518400,
+        "non_dark_samples": 0
+      }
+    }
+  ],
+  "captured_output": {
+    "final_run_captures_checked": 7,
+    "all_captured_bgr_channels_zero": true,
+    "note": "Captures are downsampled; no playable visuals were observed."
+  },
+  "remaining_graphics_findings": [
+    "Mesh pipelines were refused because an MS was classified in the AS slot. This needs separate investigation.",
+    "Command-list and allocator extension calls still reached stubs."
+  ],
+  "runtime_warning_scope": "Existing UMA host-memory import fallback remains; no shader/presentation correctness claim follows from exit code 0."
+}

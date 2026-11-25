@@ -90,7 +90,10 @@ pub(super) unsafe extern "system" fn create_command_allocator_x(this: *mut c_voi
 
 unsafe fn create_list(this: *mut c_void, node: u32, ty: u32, alloc: usize, pso: usize, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
     let dma = !riid.is_null() && guid_bytes(&*riid) == guid_bytes(&IID_XBOX_DMA_COMMAND_LIST);
-    let riid = if dma { &IID_GRAPHICS_COMMAND_LIST as *const GUID } else { riid };
+    // The console list wrapper implements these IIDs. D3DMetal can return S_OK/null
+    // for them instead of E_NOINTERFACE, so create its backing with the PC IID.
+    let console = riid.as_ref().is_some_and(super::title_list::is_console_iid);
+    let riid = if dma || console { &IID_GRAPHICS_COMMAND_LIST as *const GUID } else { riid };
     let (node, ty) = (if node == 0 { 0 } else { 1 }, pc_list_type(ty) as usize);
     let hr = if super::console_list::enabled() {
         real::dev_create_command_list_x(this, node, ty, alloc, pso, riid, ppv)
@@ -102,6 +105,9 @@ unsafe fn create_list(this: *mut c_void, node: u32, ty: u32, alloc: usize, pso: 
         }
         hr
     };
+    if hr >= 0 && !ppv.is_null() && (*ppv).is_null() {
+        return E_FAIL;
+    }
     if dma && hr >= 0 && !ppv.is_null() {
         real::readopt(*ppv, real::Kind::DmaList);
         if std::env::var_os("XCL_WATCH_DMA").is_some() {
@@ -1112,6 +1118,127 @@ pub(super) unsafe extern "system" fn create_command_signature_x(this: *mut c_voi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[repr(C)]
+    struct ListDevice {
+        vt: usize,
+        asked: Option<(u32, u16, u16, [u8; 8])>,
+        result: HRESULT,
+    }
+
+    unsafe extern "system" fn no_interface(_: *mut c_void, _: *const GUID, out: *mut *mut c_void) -> HRESULT {
+        *out = std::ptr::null_mut();
+        crate::util::E_NOINTERFACE
+    }
+
+    unsafe extern "system" fn list_device_release(_: *mut c_void) -> u32 { 1 }
+
+    unsafe extern "system" fn record_list_iid(this: *mut c_void, _: usize, _: usize, _: usize, _: usize, iid: *const GUID, out: *mut *mut c_void) -> HRESULT {
+        let dev = &mut *(this as *mut ListDevice);
+        dev.asked = iid.as_ref().map(guid_bytes);
+        if !out.is_null() { *out = std::ptr::null_mut(); }
+        dev.result
+    }
+
+    fn list_device(result: HRESULT) -> ListDevice {
+        static VT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let vt = *VT.get_or_init(|| {
+            let mut vt = Box::new([0usize; 1024]);
+            vt[0] = no_interface as usize;
+            vt[2] = list_device_release as usize;
+            vt[12] = record_list_iid as usize;
+            Box::into_raw(vt) as usize
+        });
+        ListDevice { vt, asked: None, result }
+    }
+
+    #[test]
+    fn command_list_creation_translates_console_iids_and_preserves_other_requests() {
+        let console5 = GUID::from_u128(0x55050859_4024_474c_98cf_645b51dc4874);
+        let console6 = GUID::from_u128(0xc3827890_4024_474c_98cf_645b51dc4874);
+        let pc6 = GUID::from_u128(0xc3827890_e548_4cfa_96cf_5689a9370f80);
+        let unknown = GUID::from_u128(0x12345678_1234_1234_1234_123456789abc);
+        for (requested, expected) in [
+            (&console5, &IID_GRAPHICS_COMMAND_LIST), (&console6, &IID_GRAPHICS_COMMAND_LIST),
+            (&IID_XBOX_DMA_COMMAND_LIST, &IID_GRAPHICS_COMMAND_LIST),
+            (&IID_GRAPHICS_COMMAND_LIST, &IID_GRAPHICS_COMMAND_LIST), (&pc6, &pc6), (&unknown, &unknown),
+        ] {
+            for extended in [false, true] {
+                let mut dev = list_device(E_INVALIDARG);
+                let this = &mut dev as *mut _ as *mut c_void;
+                let mut out = std::ptr::null_mut();
+                unsafe {
+                    real::adopt(this, real::Kind::Device);
+                    let hr = if extended {
+                        create_command_list_x(this, [0, 2, 1, 0].as_ptr(), 0, 0, requested, &mut out)
+                    } else {
+                        create_command_list_pc(this, 1, 0, 0, 0, requested, &mut out)
+                    };
+                    assert_eq!(hr, E_INVALIDARG, "preserve the host's failure");
+                }
+                assert_eq!(dev.asked, Some(guid_bytes(expected)), "extended={extended}");
+                assert!(out.is_null());
+            }
+        }
+    }
+
+    #[test]
+    fn command_list_creation_rejects_success_without_an_object() {
+        let mut dev = list_device(S_OK);
+        let this = &mut dev as *mut _ as *mut c_void;
+        let mut out = std::ptr::null_mut();
+        unsafe {
+            real::adopt(this, real::Kind::Device);
+            assert_eq!(create_command_list_x(this, [0, 2, 1, 0].as_ptr(), 0, 0, &IID_GRAPHICS_COMMAND_LIST, &mut out), E_FAIL);
+            dev.result = crate::util::S_FALSE;
+            let this = &mut dev as *mut _ as *mut c_void;
+            assert_eq!(create_command_list_pc(this, 1, 0, 0, 0, &IID_GRAPHICS_COMMAND_LIST, std::ptr::null_mut()), crate::util::S_FALSE);
+        }
+        assert!(out.is_null());
+    }
+
+    #[test]
+    fn gpu_command_list_creation_accepts_console_iids() {
+        unsafe {
+            // The opt-in recorder's Close replays through the runtime's UMA buffer.
+            if super::super::console_list::enabled() {
+                if let Err(reason) = real::init() {
+                    crate::gpu::recomp::runner::skip_test(&format!("no GPU: {reason}"));
+                    return;
+                }
+            }
+            let mut dev: Option<ID3D12Device> = None;
+            if D3D12CreateDevice(None, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0, &mut dev).is_err() || dev.is_none() {
+                crate::gpu::recomp::runner::skip_test("no GPU");
+                return;
+            }
+            let dev = dev.unwrap();
+            real::adopt(dev.as_raw(), real::Kind::Device);
+            for iid in [
+                GUID::from_u128(0x55050859_4024_474c_98cf_645b51dc4874),
+                GUID::from_u128(0xc3827890_4024_474c_98cf_645b51dc4874),
+            ] {
+                let alloc: ID3D12CommandAllocator = dev.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap();
+                let mut raw = std::ptr::null_mut();
+                let hr = create_command_list_x(dev.as_raw(), [0, 2, 1, 0].as_ptr(), alloc.as_raw() as usize, 0, &iid, &mut raw);
+                assert!(hr >= 0 && !raw.is_null(), "console IID {}: hr={hr:#x}, list={raw:?}", super::super::layout::guid_string(&iid));
+                let list = ID3D12GraphicsCommandList::from_raw(raw);
+                let backing = if super::super::console_list::enabled() {
+                    super::super::console_list::pc_list(raw)
+                } else {
+                    super::super::title_list::backing(raw)
+                };
+                assert!(backing.is_some(), "the title must receive its console-shaped wrapper");
+                let qi: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT =
+                    std::mem::transmute(*(*(raw as *const *const usize)));
+                let mut queried = std::ptr::null_mut();
+                assert_eq!(qi(raw, &iid, &mut queried), S_OK);
+                assert_eq!(queried, raw);
+                drop(ID3D12GraphicsCommandList::from_raw(queried));
+                list.Close().unwrap();
+            }
+        }
+    }
 
     #[test]
     fn console_types_and_descs_become_pc_ones() {

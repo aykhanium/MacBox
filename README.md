@@ -142,6 +142,19 @@ timestamps, window behavior, DirectStorage fences and XMA2 audio. Stencil also r
 a known limitation of the inherited Mac port. Passing synthetic rendering checks does
 not establish complete game compatibility.
 
+On **2026-11-25**, command-list creation was updated to translate the console's
+GraphicsCommandList5/6 interface IDs before calling D3DMetal and to reject a
+successful host result with a null object. The existing console wrapper remains
+in use. All three new regression tests failed before the fix; afterward, 11
+targeted and neighboring tests passed, with no failures, ignores or skips. The
+three new tests also passed with `XCL_CONSOLE_LISTS=1`.
+
+A local Xbox title that previously crashed during command-list creation completed
+a 30-second bounded run with 377 PresentX calls and no crash. Captured output was
+black; shader-pipeline errors and unimplemented graphics calls remain. This does
+not establish playable gameplay. [Validation details](tests/results/macos-command-list-2026-11-25.json)
+record the commands and limits, measured with **Codex (GPT-6)** on the setup above.
+
 ## Source and credits
 
 MacBox is a derivative of **[XCL](https://github.com/xcl-dev/xcl)**. The console runtime,

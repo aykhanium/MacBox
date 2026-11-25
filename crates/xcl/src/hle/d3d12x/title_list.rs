@@ -160,12 +160,16 @@ const CONSOLE_LIST_IIDS: [(u32, u16, u16, [u8; 8]); 2] = [
     (0xc382_7890, 0x4024, 0x474c, [0x98, 0xcf, 0x64, 0x5b, 0x51, 0xdc, 0x48, 0x74]),
 ];
 
+pub(super) fn is_console_iid(g: &GUID) -> bool {
+    CONSOLE_LIST_IIDS.contains(&(g.data1, g.data2, g.data3, g.data4))
+}
+
 unsafe extern "system" fn qi(this: *mut c_void, riid: *const GUID, ppv: *mut *mut c_void) -> HRESULT {
     let pc = *((this as usize + F_BACKING) as *const *mut c_void);
     let f: unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT = std::mem::transmute(pc_slot(pc, 0));
     if !riid.is_null() && !ppv.is_null() {
         let g = &*riid;
-        if CONSOLE_LIST_IIDS.contains(&(g.data1, g.data2, g.data3, g.data4)) {
+        if is_console_iid(g) {
             let add_ref: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(pc_slot(pc, 1));
             add_ref(pc);
             *ppv = this;
