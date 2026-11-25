@@ -6,18 +6,38 @@
 <h2 align="center">XCL compatibility layer for Apple Silicon macOS</h2>
 
 <p align="center">
-  <img src="assets/progress.svg" alt="Project progress: 15% complete" width="420">
+  <a href="#requirements"><img src="assets/badges/apple-silicon.svg" alt="Apple Silicon: M5 Max tested"></a>
+  <a href="#requirements"><img src="assets/badges/macos.svg" alt="macOS: 27.2 tested"></a>
+  <a href="#tests-and-current-status"><img src="assets/badges/tests.svg" alt="Test suite: known failures"></a>
+  <a href="LICENSE"><img src="assets/badges/license.svg" alt="License: GPL-2.0-only"></a>
 </p>
 
-**MacBox is an experimental ARM macOS compatibility layer and build workflow for
+<p align="center">
+  Star MacBox to follow its progress on Apple Silicon. Help with testing, bug reports
+  and focused fixes is welcome; start with <a href="CONTRIBUTING.md">the contribution guide</a>.
+</p>
+
+> [!IMPORTANT]
+> **GTA VI has reached the Terms & Conditions screen in local MacBox development testing. It is not playable yet.**
+>
+> Local testing has shown the account picker, Rockstar intro and legal screens on an
+> Apple M5 Max. After accepting the terms, the reported development run reached a loading
+> screen and later crashed. The main menu and gameplay have not been reached.
+> See the [launch notes](tests/results/macos-launch-2026-11-25.json) for the measured results.
+>
+> MacBox includes no game files. Running a title requires your own copy of its game data.
+
+Read the [terms of use and legal notice](TERMS_OF_USE.md) for license rights,
+third-party requirements and the project's repository policies.
+
+**MacBox is an experimental compatibility layer and build workflow for
 [XCL](https://github.com/xcl-dev/xcl)**, the Xbox Series X|S compatibility runtime.
 It runs XCL's Windows x86-64 engine on Apple Silicon using **CrossOver, Rosetta 2
 and D3DMetal**. A native ARM64 XCL runtime has not been implemented.
 
-The project currently builds, launches and passes targeted GPU compute and rendering
-tests on an M5 Max. The broader runtime suite still has failures. **Retail gameplay
-has not been validated for MacBox**; upstream XCL's Windows game compatibility list
-is not a MacBox compatibility list.
+Targeted GPU compute and rendering checks pass on the tested setup, while the broader
+runtime suite still has failures. Upstream XCL's Windows compatibility results do not
+establish MacBox compatibility; the measurements below describe this Mac build.
 
 ## How it works
 
@@ -155,6 +175,12 @@ black; shader-pipeline errors and unimplemented graphics calls remain. This does
 not establish playable gameplay. [Validation details](tests/results/macos-command-list-2026-11-25.json)
 record the commands and limits, measured with **Codex (GPT-6)** on the setup above.
 
+Later local development testing reached the account picker, Rockstar intro and
+Terms & Conditions, then a loading screen before a crash. The
+[development launch record](tests/results/macos-launch-2026-11-25.json) distinguishes
+the baseline from subsequent working-tree changes. This documentation update
+publishes those observations; the separate runtime work is still in progress.
+
 ## Source and credits
 
 MacBox is a derivative of **[XCL](https://github.com/xcl-dev/xcl)**. The console runtime,
@@ -186,5 +212,8 @@ Windows or historical behavior beyond MacBox's verified status.
 ## License
 
 **GPL-2.0-only**; see [`LICENSE`](LICENSE) and [`THIRD_PARTY.md`](THIRD_PARTY.md).
+The [terms of use and legal notice](TERMS_OF_USE.md) explain the project's scope
+without changing the GPL. [Provenance review notes](docs/legal-provenance.md)
+record the upstream sources and an unresolved rights question about BCPack tables.
 External tools and compatibility components retain their own licenses. No game data,
 console SDK binaries, keys, decryption tools or DRM-circumvention components are included.

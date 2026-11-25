@@ -20,6 +20,12 @@ carry a note in their header about its origin and the date of changes (GPL-2.0 �
 | DXC (`dxcompiler.dll`, `dxil.dll`) from the Windows SDK | NCSA (dxcompiler) / Microsoft (dxil) | HLSL → DXIL compilation at runtime | loaded from the user's SDK, **not** distributed with XCL |
 | Windows system libraries (d3d12, dxgi, xaudio2_9, mfplat, MSOpusDecoder, ole32 …) | system | target APIs | GPL-2.0 "system library" exception |
 
+XCL's recorded permission for the in-progress BCPack integration is not independent
+clearance of all table rights. VIctory's [asset policy](https://github.com/Marvisak/VIctory/blob/main/docs/asset-policy.md)
+expressly excludes `bcpack-tables.bin` from its repository license. The
+[provenance review](docs/legal-provenance.md) records the evidence and remaining
+verification needed before distributing those tables.
+
 When adding dependencies: compatible with GPL-2.0-only are MIT, BSD, Zlib, ISC, Unlicense, LGPL-2.1(+),
 GPL-2.0(+), MPL-2.0 (via its Secondary License clause). Incompatible: Apache-2.0 without an alternative,
 GPL-3.0, LGPL-3.0, AGPL.

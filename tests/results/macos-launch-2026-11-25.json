@@ -1,0 +1,511 @@
+{
+  "project": "MacBox",
+  "date": "2026-11-25",
+  "base_commit": "5c1fbc3a138dd11ab4c03a3b8cb94e4ef7d36996",
+  "state": "Uncommitted working-tree storage changes: host fences, explicit queue submission, and BCPack decoder/integration. No PR created.",
+  "hardware": "Apple M5 Max, 64 GB, macOS 27.2 (26B123), CrossOver 26.3.0.39832, D3DMetal",
+  "rust": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "target": "x86_64-pc-windows-gnullvm",
+  "profile": "release",
+  "validator": "Codex (GPT-6)",
+  "upstream": {
+    "url": "https://github.com/xcl-dev/xcl/pull/1813",
+    "head": "4d19aed29a13e54674fc551659a43683c8467577",
+    "license": "GPL-2.0-only"
+  },
+  "runs": [
+    {
+      "name": "fence_before_fix",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "hle::dstorage::tests::a_fence_of_the_hosts_d3d12_is_signalled",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 101,
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      },
+      "runtime_skips": []
+    },
+    {
+      "name": "directstorage_after_fix",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "hle::dstorage::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 0,
+      "counts": {
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0
+      },
+      "runtime_skips": []
+    },
+    {
+      "name": "synthetic_title_after_fence_fix_isolated",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--test",
+        "e2e",
+        "test_title_runs_and_game_folder_is_untouched",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all",
+        "XCL_BACKGROUND": "1"
+      },
+      "exit_code": 101,
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      },
+      "runtime_skips": [],
+      "synthetic_checks": {
+        "passed": 42,
+        "failed": 8
+      },
+      "directstorage_check": "[PASS] DirectStorage (xcrdapi): a file read into memory, status + D3D12 fence",
+      "failed_checks": [
+        "[FAIL] user32: a top-level window made either way (CreateWindowExW / A) is the hidden 1920x1080 console screen: W: not cloaked",
+        "[FAIL] storage: save folder + persistent local storage: pls dir S:\\",
+        "[FAIL] XPersistentLocalStorage: a drive root, as on the console: create S:/Users/xcl/games: Path not found. (os error 3)",
+        "[FAIL] D3D12.X: console command list memory methods (writes, timestamp, fill, copy, KickoffX, Wait32/64): Write32BitValueBottomOfPipeX: 0x0",
+        "[FAIL] D3D12.X: sparse VRAM buffer heaps (placed aliasing, persistent Map coherence, readback): persistent Map mutation did not reach GPU: 0x11223344",
+        "[FAIL] D3D12.X: coherent window headroom (CUSTOM+WRITE_BACK & oversized READBACK in sparse VRAM): CUSTOM+WRITE_BACK COPY_DEST Map(NULL) readback mismatch: 0x0 0x0",
+        "[FAIL] D3D12.X: async ring-buffered sparse uploads (80 MiB across 20 submits + reused-tile zeroing): submit 0 head mismatch: got 0x0, want 0xa5000000",
+        "[FAIL] XAudio2: console flags/device, XMA2 & Opus voices decoded, PCM passes, callbacks: XMA2 GetState: ctx=0x0, queued=1"
+      ]
+    },
+    {
+      "name": "autosubmit_before",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "hle::dstorage::tests::create_queue1_auto_submit_disabled_waits_for_submit",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 101,
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      },
+      "runtime_skips": {},
+      "log_sha256": "2f2c4d4a065c28d65b0c8d3d872a11f0334939b3d94281b060c6f3a0a78e8eca",
+      "failing_tests": [
+        "hle::dstorage::tests::create_queue1_auto_submit_disabled_waits_for_submit"
+      ]
+    },
+    {
+      "name": "autosubmit_after",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "hle::dstorage::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 0,
+      "counts": {
+        "passed": 15,
+        "failed": 0,
+        "ignored": 0
+      },
+      "runtime_skips": {},
+      "log_sha256": "bbf839c603587f26dcafbee24fa46315612a0718b05a6fe1b05c374712c69030"
+    },
+    {
+      "name": "bcpack_standalone",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "hle::bcpack::",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 0,
+      "counts": {
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      "runtime_skips": {},
+      "log_sha256": "c387662d95ebbc48d9307b68f5da3199726c42ee56a601e49afbdb76d204bf67"
+    },
+    {
+      "name": "bcpack_integration_before",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "bcpack_synthetic_requests_through_the_queue",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 101,
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      },
+      "runtime_skips": {},
+      "log_sha256": "9f371b3f9bc62ad7b981051d87c8e0a98ec1afd2ba9e4f39caa5ec8ea1967d52",
+      "failing_tests": [
+        "hle::dstorage::tests::bcpack_synthetic_requests_through_the_queue"
+      ]
+    },
+    {
+      "name": "storage_initial_integration",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "--",
+        "hle::dstorage::",
+        "hle::bcpack::",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 101,
+      "counts": {
+        "passed": 21,
+        "failed": 1,
+        "ignored": 0
+      },
+      "runtime_skips": {},
+      "log_sha256": "55ec8872698d4e2c9a840a7adc54a0f8becfbf86ade9964a984f7babc2b7ee61",
+      "failing_tests": [
+        "hle::dstorage::tests::requests_are_checked_like_the_console"
+      ]
+    },
+    {
+      "name": "storage_final",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "--",
+        "hle::dstorage::",
+        "hle::bcpack::",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all"
+      },
+      "exit_code": 0,
+      "counts": {
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0
+      },
+      "runtime_skips": {},
+      "log_sha256": "f54251f101c44beb7731eb5e126690d02832a95e1c52e8c317569bf698c6035a"
+    },
+    {
+      "name": "library_final",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--lib",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all",
+        "XCL_BACKGROUND": "1"
+      },
+      "exit_code": 101,
+      "counts": {
+        "passed": 661,
+        "failed": 21,
+        "ignored": 23
+      },
+      "runtime_skips": {
+        "gpu::recomp::tests::gpu_geometry_wave32_prefix_count_over_a_mask": "SKIPPED gpu::recomp::tests::gpu_geometry_wave32_prefix_count_over_a_mask: no wave64",
+        "gpu::recomp::tests::gpu_retail_vs_blit_gen_amb_cube": "XCL_SAMPLE_RPF not set \u2013 skipping",
+        "gpu::recomp::tests::gpu_wave32_program_in_wave64_hardware": "SKIPPED gpu::recomp::tests::gpu_wave32_program_in_wave64_hardware: no wave64",
+        "gpu::shader::tests::readable_answers_from_the_working_set_without_touching_pages": "SKIPPED readable_answers_from_the_working_set_without_touching_pages: this host reports no working set",
+        "gpu::texture::tests::retail_ttpf_textures_detile_with_their_mip_chains": "XCL_SAMPLE_TTPF not set \u2013 skipping",
+        "hle::d3d12x::title_textures::tests::placed_title_textures_share_vram_and_preserve_pixels": "SKIPPED placed_title_textures_share_vram_and_preserve_pixels: this adapter makes no reserved cube with mips",
+        "hle::opus::tests::decode_awc_block_preskip_rate_and_flush": "skipping: MSOpusDecoder.dll not available",
+        "hle::opus::tests::decode_ogg_eos_matches_raw_pcm_window_mono_and_stereo": "skipping: MSOpusDecoder.dll not available",
+        "hle::opus::tests::decode_silk_hybrid_celt_all_frame_sizes": "skipping: MSOpusDecoder.dll not available",
+        "hle::opus::tests::decode_stereo_and_multistream_5_1": "skipping: MSOpusDecoder.dll not available",
+        "hle::opus::tests::decodes_a_game_sound": "XCL_SAMPLE_AWC not set \u2013 skipping",
+        "hle::xaudio2::tests::opus_source_voice_decodes_and_manages_lifetime": "skipping: MSOpusDecoder.dll not available",
+        "hle::xgameruntime::api::tests::thunk_protocol_with_xcl_objects_on_pc_queues": "no system xgameruntime.dll \u2013 skipping",
+        "shaders::tests::retail_pack_sample": "XCL_SAMPLE_RPF not set \u2013 skipping"
+      },
+      "log_sha256": "8d229af63430d7dd40b6e1357ac235f0a65886e274f3e7a2d177f22a61f121c8",
+      "failing_tests": [
+        "gpu::recomp::tests::gpu_atomic_fcmpswap_x2",
+        "gpu::recomp::tests::gpu_atomic_fmin_fmax_x2",
+        "gpu::recomp::tests::gpu_clamp_and_omod_per_instruction",
+        "gpu::recomp::tests::gpu_f64_class_compare",
+        "gpu::recomp::tests::gpu_f64_compares_with_nan",
+        "gpu::recomp::tests::gpu_f64_literal_high_word",
+        "gpu::recomp::tests::gpu_f64_math_random",
+        "gpu::recomp::tests::gpu_f64_roots",
+        "gpu::recomp::tests::gpu_f64_rounding_and_conversions",
+        "gpu::recomp::tests::gpu_float_compares_random",
+        "gpu::recomp::tests::gpu_frexp_f64_exp_and_mant",
+        "gpu::recomp::tests::gpu_ldexp_f64",
+        "gpu::recomp::tests::gpu_more_atomics_sub_dword_scratch_valu",
+        "gpu::recomp::tests::gpu_ps_image_sample_offset_implicit_lod_between_mips",
+        "gpu::recomp::tests::gpu_rndne_f64",
+        "gpu::recomp::tests::gpu_uma_import_check_at_init",
+        "gpu::recomp::tests::gpu_valu_16_and_64_bit",
+        "hle::d3d12x::list_x::tests::timestamps_outside_unified_memory_land_after_the_queue",
+        "hle::d3d12x::present::frame_dump_tests::mapped_frame_dump_distinguishes_dark_bright_and_undecoded_content",
+        "hle::d3d12x::real::readback_routing_tests::coherent_buffer_sanitizes_console_flags_and_state",
+        "hle::xaudio2::tests::xma2_source_voice_decodes_and_manages_lifetime"
+      ]
+    },
+    {
+      "name": "synthetic_title_storage_final",
+      "command": [
+        "./scripts/macos.sh",
+        "test",
+        "--test",
+        "e2e",
+        "test_title_runs_and_game_folder_is_untouched",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "environment": {
+        "WINEDEBUG": "-all",
+        "XCL_BACKGROUND": "1"
+      },
+      "exit_code": 101,
+      "counts": {
+        "passed": 0,
+        "failed": 1,
+        "ignored": 0
+      },
+      "runtime_skips": {},
+      "log_sha256": "245d02a4293d292be8202e28a7ae62d32cc677079793418a9543bed1db0fe759",
+      "failing_tests": [
+        "test_title_runs_and_game_folder_is_untouched"
+      ],
+      "synthetic_checks": {
+        "passed": 41,
+        "failed": 9
+      },
+      "failed_checks": [
+        "[FAIL] user32: a top-level window made either way (CreateWindowExW / A) is the hidden 1920x1080 console screen: W: not cloaked",
+        "[FAIL] storage: save folder + persistent local storage: pls dir S:\\",
+        "[FAIL] XPersistentLocalStorage: a drive root, as on the console: create S:/Users/xcl/games: Path not found. (os error 3)",
+        "[FAIL] D3D12.X: console device methods (placed title memory, DMA queue + list, page pools): the DMA copy did not read the title's memory",
+        "[FAIL] D3D12.X: console command list memory methods (writes, timestamp, fill, copy, KickoffX, Wait32/64): Write32BitValueBottomOfPipeX: 0x0",
+        "[FAIL] D3D12.X: sparse VRAM buffer heaps (placed aliasing, persistent Map coherence, readback): submit 1 buf_a readback mismatch",
+        "[FAIL] D3D12.X: coherent window headroom (CUSTOM+WRITE_BACK & oversized READBACK in sparse VRAM): CUSTOM+WRITE_BACK COPY_DEST Map(NULL) readback mismatch: 0x0 0x0",
+        "[FAIL] D3D12.X: async ring-buffered sparse uploads (80 MiB across 20 submits + reused-tile zeroing): submit 1 head mismatch: got 0x0, want 0xa5000001",
+        "[FAIL] XAudio2: console flags/device, XMA2 & Opus voices decoded, PCM passes, callbacks: XMA2 GetState: ctx=0x0, queued=1"
+      ]
+    }
+  ],
+  "baseline_title_run": {
+    "command": [
+      "./scripts/macos.sh",
+      "run",
+      "<local game folder, Wine path>"
+    ],
+    "environment": {
+      "WINEDEBUG": "-all",
+      "XCL_NETWORK": "0",
+      "XCL_DATA_ROOT": "<isolated data directory, Wine path>",
+      "XCL_RUN_SECONDS": "180",
+      "XCL_ACTIVITY": "1",
+      "XCL_BACKGROUND": "1",
+      "XCL_DXC_THREADS": "4",
+      "XCL_ASYNC_PSO": "1",
+      "XCL_FRAME_DUMP": "120",
+      "XCL_THREAD_DUMP_AT": "150"
+    },
+    "base_commit": "5c1fbc3a138dd11ab4c03a3b8cb94e4ef7d36996",
+    "binary_sha256": "02fdfc0ef8fe8deb23690b91c23b29f738c70be7f14bc2fa48b8ab42ac395d12",
+    "exit_code": 0,
+    "elapsed_seconds": 182.78,
+    "crash": null,
+    "present_x_calls": 4521,
+    "shown_frames": 4521,
+    "last_frame_dump": {
+      "frame": 4460,
+      "width": 3840,
+      "height": 2160,
+      "format": 28,
+      "sample_step": 4,
+      "sampled_pixels": 518400,
+      "non_dark_samples": 517542
+    },
+    "translated_pipelines": 6,
+    "translation_error_entries": 40,
+    "first_nonblack_capture_seconds": 46.005,
+    "visual_observation": "Account-picker footer with Player1/A, account picker/Y and screen narration/X; main menu not verified.",
+    "termination": "XCL_RUN_SECONDS timer",
+    "note": "No input. Captures and raw logs retained outside repository. Prior 30-second runs ended before this screen appeared."
+  },
+  "source_sha256": {
+    "crates/xcl/src/hle/dstorage.rs": "48d849eae9e50d079b1d44ee482c3b9ba402cac7c82674d7f1a6169ee4a74d5d"
+  },
+  "not_tested": [
+    "Native ARM64 macOS runtime: not built / not tested.",
+    "Native Windows/MSVC tests and upstream smoke comparison on committed heads.",
+    "Full workspace suite: library and synthetic-title test run, other integration tests not rerun.",
+    "Optional retail BCPack parity test: XCL_SAMPLE_BCPACK unset; not run and not counted as coverage.",
+    "Main menu and gameplay not yet verified.",
+    "Independent retail texture byte parity for the imported decoder."
+  ],
+  "fence_fix_title_run": {
+    "command": [
+      "./scripts/macos.sh",
+      "run",
+      "<local game folder, Wine path>"
+    ],
+    "environment": {
+      "WINEDEBUG": "-all",
+      "XCL_NETWORK": "0",
+      "XCL_DATA_ROOT": "<isolated data directory, Wine path>",
+      "XCL_RUN_SECONDS": "900",
+      "XCL_ACTIVITY": "1",
+      "XCL_BACKGROUND": "1",
+      "XCL_DXC_THREADS": "4",
+      "XCL_ASYNC_PSO": "1",
+      "XCL_FRAME_DUMP": "60",
+      "XCL_TRACE_FRAME": "1"
+    },
+    "binary_sha256": "18a6fedadffb5b276b33d705be2ec82397dc13fc09f0052fdab82276316620ce",
+    "source_sha256": "48d849eae9e50d079b1d44ee482c3b9ba402cac7c82674d7f1a6169ee4a74d5d",
+    "launcher_exit_code": 5,
+    "elapsed_seconds": 460.1,
+    "windows_exit_code": 3221225477,
+    "crash_location": "game_scarlett_master.exe+0x23cf683, write to address 0",
+    "present_x_calls": 8486,
+    "shown_frames": 8486,
+    "translated_pipelines": 162,
+    "dxil_cache": {
+      "hits": 39,
+      "misses": 169,
+      "coalesced_hits": 0,
+      "deferred_misses": 0,
+      "compilations": 169,
+      "compilation_failures": 0,
+      "compilation_errors": []
+    },
+    "bcpack_refused": {
+      "BC1": {
+        "requests": 2084,
+        "with_zlib": 0,
+        "destination_bytes": 148226048,
+        "filled_bytes": 0
+      },
+      "BC5": {
+        "requests": 108,
+        "with_zlib": 0,
+        "destination_bytes": 7143424,
+        "filled_bytes": 0
+      },
+      "BC6H": {
+        "requests": 1,
+        "with_zlib": 0,
+        "destination_bytes": 1048576,
+        "filled_bytes": 0
+      },
+      "BC7": {
+        "requests": 195,
+        "with_zlib": 0,
+        "destination_bytes": 25169920,
+        "filled_bytes": 0
+      }
+    },
+    "visual_observations": [
+      "Account screen",
+      "Rockstar intro animation",
+      "Legal notices and terms screens",
+      "Loading spinner after user completed terms"
+    ],
+    "input": "User operated keyboard and completed first-run settings/terms.",
+    "limitations": [
+      "Main menu not reached.",
+      "Run advanced beyond baseline input state; not a performance comparison.",
+      "An e2e test ran during part of this run; its results were rerun in isolation afterward."
+    ]
+  },
+  "integration_test_note": "Initial integration suite retained an old assertion that valid BC1 was unsupported. Updated it to assert supported BC1 and added an explicit unsupported BC2 assertion; the successful decode and guard checks already passed.",
+  "upstream_sources": [
+    {
+      "url": "https://github.com/xcl-dev/xcl/pull/1813",
+      "head": "4d19aed29a13e54674fc551659a43683c8467577"
+    },
+    {
+      "url": "https://github.com/xcl-dev/xcl/pull/1790",
+      "head": "7a6f47a53975d3c1d5367a7742970bf53c547d33"
+    },
+    {
+      "url": "https://github.com/xcl-dev/xcl/pull/905",
+      "snapshot": "10915eb96938d1bbdb111a60058a396f0942ee02",
+      "provenance_correction": "8add9a327f60dfe34fcd3a7ea16368c0ec5a7a22",
+      "scope": "BCPack port accepted upstream as GPL-2.0-only with author permission; not a general Victory license change."
+    }
+  ],
+  "final_source_sha256": {
+    "crates/xcl/src/hle/dstorage.rs": "347556f8a825406774c3612117539ccce3220654ee3004cbc6f534b4a3b675cb",
+    "crates/xcl/src/hle/mod.rs": "4c3a0c2d8c44f18e5d6318fbb6172c05c52c4cc6bc11f8ab47a2bca09f8ef96a",
+    "crates/xcl/src/report.rs": "affa39e0eb67a6de9cc1994dcb19c7979b0bc844d474781e126c36d7f0d0f97a",
+    "crates/xcl/src/hle/bcpack/mod.rs": "7672438aedfe5e69ee560eb57c58bf0be0b96d0dd3564f48c15b626b0a4f7726",
+    "crates/xcl/src/hle/bcpack/tests.rs": "febeaf16341a914c950c3ae24d0dcb883c1c77fbb451adf2a9789217f982e213",
+    "crates/xcl/src/hle/bcpack/victory.rs": "b71b1dd00203dc7f45d11a7b72adb6048fbab67a8c44191b14a3552b357b6075",
+    "crates/xcl/src/hle/bcpack/tables.rs": "39e77c8b77432e040f16add90dba45a5158128026b0132a110c169904aa5be3f"
+  }
+}
