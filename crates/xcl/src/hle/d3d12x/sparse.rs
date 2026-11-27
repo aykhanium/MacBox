@@ -1517,6 +1517,7 @@ pub unsafe fn place_buffer(this: *mut c_void, va: usize, desc: &D3D12_RESOURCE_D
     let raw = *ppv;
     let res = ID3D12Resource::from_raw_borrowed(&raw)?.clone();
     s.map_tiles(&res, start, &tiles);
+    s.drain_forgotten();
     for &(_, tile) in &tiles {
         *s.pinned.entry(tile).or_default() += 1;
     }
@@ -1525,18 +1526,45 @@ pub unsafe fn place_buffer(this: *mut c_void, va: usize, desc: &D3D12_RESOURCE_D
     Some((hr, delta))
 }
 
-/// A placed buffer is gone: its tiles are not pinned by it any more.
+static FORGOTTEN: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// A placed buffer is gone: its tiles are not pinned by it any more. The release can come from
+/// inside the host's D3D12 while it holds its own lock (D3DMetal releases resources in
+/// `FlushResourceInitialisation`), and STATE's holders call into the host
+/// (`CreateReservedResource`, `UpdateTileMappings`): never wait for STATE here, queue it instead.
 pub fn forget_buffer(res: usize) {
-    let mut g = STATE.lock().unwrap();
-    let Some(s) = g.as_mut() else { return };
-    let Some(tiles) = s.buffers.remove(&res) else { return };
-    for tile in tiles {
-        if let Some(c) = s.pinned.get_mut(&tile) {
-            *c -= 1;
-            if *c == 0 {
-                s.pinned.remove(&tile);
-                s.release_if_unused(tile);
+    match STATE.try_lock() {
+        Ok(mut g) => {
+            if let Some(s) = g.as_mut() {
+                s.drain_forgotten();
+                s.forget(res);
             }
+        }
+        Err(std::sync::TryLockError::WouldBlock) => FORGOTTEN.lock().unwrap().push(res),
+        Err(std::sync::TryLockError::Poisoned(_)) => {}
+    }
+}
+
+impl State {
+    fn forget(&mut self, res: usize) {
+        let Some(tiles) = self.buffers.remove(&res) else { return };
+        for tile in tiles {
+            if let Some(c) = self.pinned.get_mut(&tile) {
+                *c -= 1;
+                if *c == 0 {
+                    self.pinned.remove(&tile);
+                    self.release_if_unused(tile);
+                }
+            }
+        }
+    }
+
+    /// The releases `forget_buffer` queued, before a buffer is registered (its address may be
+    /// one of theirs).
+    fn drain_forgotten(&mut self) {
+        let pending = std::mem::take(&mut *FORGOTTEN.lock().unwrap());
+        for res in pending {
+            self.forget(res);
         }
     }
 }
